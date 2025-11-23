@@ -4,7 +4,7 @@ FROM e2bdev/code-interpreter:latest
 WORKDIR /home/user
 
 # Install Vite (React template) and TailwindCSS
-RUN npm create vite@latest . -- --template react && \
+RUN npm create vite@latest . -- --template react-ts && \
     npm install
 
 RUN echo "import { defineConfig } from 'vite'\nimport react from '@vitejs/plugin-react'\n\nexport default defineConfig({\n  plugins: [react()],\n  server: {\n    allowedHosts: true\n  }\n})" > vite.config.ts

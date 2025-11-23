@@ -1,0 +1,23 @@
+{
+  "name": "redis",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "exports": {
+    "./queue": "./src/queue.ts",
+    "./redis": "./src/redis.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.4.1",
+  "dependencies": {
+    "@types/node": "^20.19.9",
+    "dotenv": "^17.2.3",
+    "ioredis": "^5.8.2",
+    "typescript": "^5.9.3"
+  }
+}

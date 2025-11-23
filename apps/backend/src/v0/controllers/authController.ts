@@ -4,6 +4,8 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { Resend } from "resend";
 import type { AuthRequest } from "../middlewares/isAuthenticated";
+import dotenv from "dotenv";
+dotenv.config();
 
 const resend = new Resend(process.env.RESEND_API_KEY as string);
 
@@ -26,10 +28,10 @@ export const signupOrSignin = async (req: Request, res: Response) => {
     }
 
     const token = crypto.randomBytes(32).toString("base64url");
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+    const expiredAt = new Date(Date.now() + 15 * 60 * 1000);
 
     await prisma.authToken.create({
-      data: { token, expiresAt, userId: user.id },
+      data: { token, expiredAt, userId: user.id },
     });
 
     const FRONTEND_URL = requireEnv("FRONTEND_URL");
@@ -77,7 +79,7 @@ export const verifyToken = async (req: Request, res: Response) => {
       include: { user: true },
     });
     if (!authToken) return res.status(404).json({ error: "Invalid token" });
-    if (new Date() > authToken.expiresAt) {
+    if (new Date() > authToken.expiredAt) {
       await prisma.authToken.delete({ where: { id: authToken.id } });
       return res.status(410).json({ error: "Token has expired" });
     }

@@ -20,12 +20,12 @@ exports.Prisma = Prisma
 exports.$Enums = {}
 
 /**
- * Prisma Client JS version: 6.17.1
- * Query Engine version: 272a37d34178c2894197e17273bf937f25acdeac
+ * Prisma Client JS version: 6.18.0
+ * Query Engine version: 34b5a692b7bd79939a9a2c3ef97d816e749cda2f
  */
 Prisma.prismaVersion = {
-  client: "6.17.1",
-  engine: "272a37d34178c2894197e17273bf937f25acdeac"
+  client: "6.18.0",
+  engine: "34b5a692b7bd79939a9a2c3ef97d816e749cda2f"
 }
 
 Prisma.PrismaClientKnownRequestError = () => {
@@ -129,17 +129,82 @@ exports.Prisma.UserScalarFieldEnum = {
   updatedAt: 'updatedAt'
 };
 
+exports.Prisma.ProjectScalarFieldEnum = {
+  id: 'id',
+  userId: 'userId',
+  name: 'name',
+  description: 'description',
+  s3basePath: 's3basePath',
+  status: 'status',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+};
+
+exports.Prisma.SandboxSessionScalarFieldEnum = {
+  id: 'id',
+  templateId: 'templateId',
+  projectId: 'projectId',
+  status: 'status',
+  startedAt: 'startedAt',
+  endedAt: 'endedAt',
+  errorMessage: 'errorMessage',
+  log: 'log'
+};
+
+exports.Prisma.MessageScalarFieldEnum = {
+  id: 'id',
+  projectId: 'projectId',
+  role: 'role',
+  content: 'content',
+  parentMessageId: 'parentMessageId',
+  toolCalls: 'toolCalls',
+  type: 'type',
+  createdAt: 'createdAt'
+};
+
+exports.Prisma.JobScalarFieldEnum = {
+  id: 'id',
+  projectId: 'projectId',
+  type: 'type',
+  status: 'status',
+  errorMessage: 'errorMessage',
+  startedAt: 'startedAt',
+  completedAt: 'completedAt',
+  log: 'log'
+};
+
+exports.Prisma.ChangeSetScalarFieldEnum = {
+  id: 'id',
+  projectId: 'projectId',
+  jobId: 'jobId',
+  message: 'message',
+  createdAt: 'createdAt'
+};
+
+exports.Prisma.ChangeFileScalarFieldEnum = {
+  id: 'id',
+  changeSetId: 'changeSetId',
+  filePath: 'filePath',
+  diff: 'diff',
+  createdAt: 'createdAt'
+};
+
 exports.Prisma.AuthTokenScalarFieldEnum = {
   id: 'id',
   token: 'token',
   createdAt: 'createdAt',
-  expiresAt: 'expiresAt',
+  expiredAt: 'expiredAt',
   userId: 'userId'
 };
 
 exports.Prisma.SortOrder = {
   asc: 'asc',
   desc: 'desc'
+};
+
+exports.Prisma.NullableJsonNullValueInput = {
+  DbNull: Prisma.DbNull,
+  JsonNull: Prisma.JsonNull
 };
 
 exports.Prisma.QueryMode = {
@@ -152,9 +217,56 @@ exports.Prisma.NullsOrder = {
   last: 'last'
 };
 
+exports.Prisma.JsonNullValueFilter = {
+  DbNull: Prisma.DbNull,
+  JsonNull: Prisma.JsonNull,
+  AnyNull: Prisma.AnyNull
+};
+exports.ProjectStatus = exports.$Enums.ProjectStatus = {
+  ACTIVE: 'ACTIVE',
+  BUILDING: 'BUILDING',
+  ARCHIVED: 'ARCHIVED',
+  FAILED: 'FAILED'
+};
+
+exports.SessionStatus = exports.$Enums.SessionStatus = {
+  ACTIVE: 'ACTIVE',
+  EXPIRED: 'EXPIRED',
+  FAILED: 'FAILED',
+  COMPLETED: 'COMPLETED'
+};
+
+exports.MessageRole = exports.$Enums.MessageRole = {
+  USER: 'USER',
+  ASSISTANT: 'ASSISTANT'
+};
+
+exports.MessageType = exports.$Enums.MessageType = {
+  CHAT: 'CHAT',
+  EDIT: 'EDIT'
+};
+
+exports.JobType = exports.$Enums.JobType = {
+  PROMPT: 'PROMPT',
+  DEPLOY: 'DEPLOY',
+  BUILD: 'BUILD'
+};
+
+exports.JobStatus = exports.$Enums.JobStatus = {
+  PENDING: 'PENDING',
+  RUNNING: 'RUNNING',
+  COMPLETED: 'COMPLETED',
+  FAILED: 'FAILED'
+};
 
 exports.Prisma.ModelName = {
   User: 'User',
+  Project: 'Project',
+  sandboxSession: 'sandboxSession',
+  Message: 'Message',
+  Job: 'Job',
+  ChangeSet: 'ChangeSet',
+  ChangeFile: 'ChangeFile',
   AuthToken: 'AuthToken'
 };
 

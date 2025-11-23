@@ -8,23 +8,144 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-    id String @id @default(uuid())
-    email String @unique
-    name String?
-    password String?
-    createdAt DateTime @default(now())
-    updatedAt DateTime @updatedAt
+enum ProjectStatus {
+  ACTIVE
+  BUILDING
+  ARCHIVED
+  FAILED
+}
 
-    authTokens AuthToken[]
+enum MessageRole {
+  USER
+  ASSISTANT
+}
+
+enum MessageType {
+ CHAT //ask queries without any code change
+ EDIT //edit code
+}
+
+enum JobType {
+  PROMPT
+  DEPLOY
+  BUILD
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum SessionStatus {
+  ACTIVE
+  EXPIRED
+  FAILED
+  COMPLETED
+}
+
+model User {
+  id         String       @id @default(uuid())
+  email      String       @unique
+  name       String?
+  password   String?
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  authTokens AuthToken[]
+  projects   Project[]
+}
+
+model Project {
+  id          String         @id @default(uuid())
+  userId      String
+  name        String
+  description String?
+  s3basePath  String
+  status      ProjectStatus
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  user        User          @relation(fields: [userId], references: [id])
+  messages    Message[]
+  jobs        Job[]
+  changeSets  ChangeSet[]
+  sandboxSession sandboxSession[]
+  @@unique([userId, name])
+
+}
+
+model sandboxSession {
+  id String @id 
+  templateId String //e2b template id
+  projectId String 
+  status SessionStatus @default(ACTIVE)
+  startedAt DateTime @default(now())
+  endedAt DateTime?
+  errorMessage String?
+  log String?
+
+  project Project @relation(fields: [projectId], references: [id])
+}
+
+model Message {
+  id                                     String       @id @default(uuid())
+  projectId                              String
+  role                                   MessageRole
+  content                                String
+  parentMessageId                        String? //for threaing
+  toolCalls                              Json?
+  type                                   MessageType
+  createdAt                              DateTime     @default(now())
+
+  project                                Project     @relation(fields: [projectId], references: [id])
+}
+
+model Job {
+  id           String       @id @default(uuid())
+  projectId    String
+  type         JobType
+  status       JobStatus
+  errorMessage String?
+  startedAt    DateTime     @default(now())
+  completedAt  DateTime?
+  log          String?
+
+  project      Project     @relation(fields: [projectId], references: [id])
+  changeSets   ChangeSet[]
+}
+
+model ChangeSet {
+  id          String        @id @default(uuid())
+  projectId   String
+  jobId       String
+  message     String
+  createdAt   DateTime      @default(now())
+
+  project     Project      @relation(fields: [projectId], references: [id])
+  job         Job          @relation(fields: [jobId], references: [id])
+
+  changeFiles ChangeFile[]
+}
+
+model ChangeFile {
+  id          String     @id @default(uuid())
+  changeSetId String
+  filePath    String
+  diff        String
+  createdAt   DateTime   @default(now())
+
+  changeSet   ChangeSet @relation(fields: [changeSetId], references: [id])
+
 }
 
 model AuthToken {
-  id        String   @id @default(uuid())
-  token     String   @unique
-  createdAt DateTime @default(now())
-  expiresAt DateTime
+  id        String    @id @default(uuid())
+  token     String    @unique
+  createdAt DateTime  @default(now())
+  expiredAt DateTime
 
-  userId String
-  user   User   @relation(fields: [userId], references: [id])
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
 }
