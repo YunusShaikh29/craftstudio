@@ -59,8 +59,9 @@ export async function populateSandbox(sandbox: Sandbox, project: Project) {
     }
 }
 
-export async function syncSandboxToS3(sandbox: Sandbox, s3basePath: string) {
+export async function syncSandboxToS3(sandbox: Sandbox | null, s3basePath: string) {
   // we might have to fix the below code as it might render literally every file. 
+  if(!sandbox) return;
   const files = await sandbox.files.list("**/*")
   for (const file of files){
     if(file.type === "file"){

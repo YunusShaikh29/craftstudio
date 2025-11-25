@@ -7,7 +7,8 @@ import * as s3 from "./s3";
 import dotenv from "dotenv";
 import { streamText } from "ai";
 import { SYSTEM_PROMPT } from "./prompt";
-import { setSandbox, TOOLS } from "./tools";
+import { fileChangesMap, setSandbox, TOOLS } from "./tools";
+import { createTwoFilesPatch, diffLines } from "diff";
 dotenv.config();
 
 const E2B_TEMPLATE_ID = "35say9dtojwu03w1zcm9";
@@ -17,6 +18,7 @@ const openrouter = createOpenRouter({
 
 async function main() {
   console.log("Worker started, waiting for jobs...");
+
 
   while (true) {
     try {
@@ -52,6 +54,25 @@ async function main() {
           `project:${projectId}`,
           JSON.stringify({ event: "JOB_STARTED", jobId })
         );
+
+        // changeset implementation here, if the message is of type Edit, create a changeset
+        interface ChangeSet {
+          id: string;
+          projectId: string;
+          jobId: string;
+          message: string;
+          createdAt: Date;
+        }
+        let changeSet: ChangeSet | null = null;
+        if (prompt?.type === "EDIT") {
+          changeSet = await prisma.changeSet.create({
+            data: {
+              projectId,
+              jobId,
+              message: prompt?.content || ""
+            }
+          })
+        }
 
         const project = await prisma.project.findUnique({
           where: { id: projectId, userId },
@@ -133,7 +154,7 @@ async function main() {
 
         setSandbox(sandbox);
 
-        
+
         //main llm logic here
         const response = streamText({
           model: openrouter("gpt-4o-mini"),
@@ -178,8 +199,27 @@ async function main() {
           }
         });
 
+        await s3.syncSandboxToS3(sandbox, project.s3basePath)
 
+        // saving files diffs in changefile.
+        if (prompt?.type === "EDIT" && changeSet) {
+          const changedFilesCount = fileChangesMap.size
 
+          for (const [path, { oldContent, newContent }] of fileChangesMap.entries()) {
+            const diff = createTwoFilesPatch(path, path, oldContent, newContent, "", "")
+            await prisma.changeFile.create({
+              data: {
+                changeSetId: changeSet?.id,
+                filePath: path,
+                diff: diff
+              }
+            })
+          }
+
+          fileChangesMap.clear()
+
+          await redis.publish(`project:${projectId}`, JSON.stringify({ event: "CHANGESET_CREATED", jobId, changedFilesCount }))
+        }
 
         await prisma.job.update({
           where: { id: jobId },

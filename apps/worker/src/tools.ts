@@ -2,11 +2,14 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { Sandbox } from "@e2b/code-interpreter";
+import { diffLines } from "diff";
 
 let sandboxRef: Sandbox | null = null;
 export function setSandbox(sandbox: Sandbox | null) {
   sandboxRef = sandbox;
 }
+
+export const fileChangesMap: Map<string, { oldContent: string, newContent: string, path: string }> = new Map()
 
 export const TOOLS = {
   listFiles: tool({
@@ -99,6 +102,14 @@ export const TOOLS = {
     }),
     execute: async ({ path, content }) => {
       if (!sandboxRef) throw new Error("Sandbox not found");
+      let oldContent = "";
+      try {
+        oldContent = await sandboxRef.files.read(path)
+      } catch (error) {
+        oldContent = ""
+      }
+     
+      fileChangesMap.set(path, { oldContent: oldContent, newContent: content, path: path })
       await sandboxRef.files.write(path, content);
       return { success: true, path };
     },
@@ -115,7 +126,12 @@ export const TOOLS = {
     }),
     execute: async ({ path, startLine, endLine, newContent }) => {
       if (!sandboxRef) throw new Error("Sandbox not initialized.");
-      const oldContent = await sandboxRef.files.read(path);
+      let oldContent = "";
+      try {
+        oldContent = await sandboxRef.files.read(path);
+      } catch (error) {
+        oldContent = ""
+      }
       const lines = oldContent.split("\n");
       const updated =
         lines.slice(0, startLine - 1).join("\n") +
@@ -123,6 +139,9 @@ export const TOOLS = {
         newContent +
         "\n" +
         lines.slice(endLine).join("\n");
+        fileChangesMap.set(path, {
+          oldContent, newContent: updated, path: path
+        })
       await sandboxRef.files.write(path, updated);
       return { success: true };
     },
@@ -139,15 +158,32 @@ export const TOOLS = {
     }),
     execute: async ({ package: pkg, dev }) => {
       if (!sandboxRef) throw new Error("Sandbox not initialized.");
+      
+      const packagePath = "package.json";
+      let oldContent = "";
+      try {
+        oldContent = await sandboxRef.files.read(packagePath);
+      } catch (error) {
+        // File didn't exist
+        oldContent = "";
+      }
+
       const cmd = `npm install ${pkg}${dev ? " --save-dev" : ""}`;
       const res = await sandboxRef.runCode(cmd);
+
+      const newContent = await sandboxRef.files.read(packagePath);
+
+      // const diff = diffLines(oldContent, newContent);
+
+      fileChangesMap.set(packagePath, { oldContent, newContent, path: packagePath });
+
       return { output: res.logs.stdout };
     },
   }),
 
   runCommand: tool({
     name: "run-command",
-    description:
+    description: 
       "Execute shell commands inside the sandbox environment (like 'npm run build' or 'ls -la').",
     inputSchema: z.object({
       command: z.string().describe("The shell command to execute."),
