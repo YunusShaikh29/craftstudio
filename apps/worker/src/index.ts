@@ -8,7 +8,7 @@ import dotenv from "dotenv";
 import { streamText } from "ai";
 import { SYSTEM_PROMPT } from "./prompt";
 import { fileChangesMap, setSandbox, TOOLS } from "./tools";
-import { createTwoFilesPatch, diffLines } from "diff";
+import { createTwoFilesPatch } from "diff";
 dotenv.config();
 
 const E2B_TEMPLATE_ID = "35say9dtojwu03w1zcm9";
@@ -19,15 +19,22 @@ const openrouter = createOpenRouter({
 async function main() {
   console.log("Worker started, waiting for jobs...");
 
-
   while (true) {
+   
+    let jobId: string | undefined;
+    let projectId: string | undefined;
+
     try {
       const result = await redis.brpop(QUEUE_NAME, 0);
 
       if (result) {
         const [queueName, jobDataString] = result;
         const jobData = JSON.parse(jobDataString);
-        const { jobId, projectId, messageId, activeSessionId } = jobData;
+        jobId = jobData.jobId;
+        projectId = jobData.projectId;
+        const { messageId, activeSessionId } = jobData;
+
+        fileChangesMap.clear();
 
         console.log(`Processing job ${jobId} for project ${projectId}`);
 
@@ -65,11 +72,12 @@ async function main() {
         }
         let changeSet: ChangeSet | null = null;
         if (prompt?.type === "EDIT") {
+         
           changeSet = await prisma.changeSet.create({
             data: {
-              projectId,
-              jobId,
-              message: prompt?.content || ""
+              projectId: projectId!,
+              jobId: jobId!,
+              message: prompt?.content
             }
           })
         }
@@ -83,6 +91,7 @@ async function main() {
         }
 
         let sandbox: Sandbox | null = null;
+        let needsNewSandbox = true;
 
         const activeSession = await prisma.sandboxSession.findFirst({
           where: {
@@ -92,11 +101,12 @@ async function main() {
           },
         });
 
-        // if the sandbox is active, reconnect to it
+        // if the sandbox is active, try to reconnect to it
         if (activeSession && activeSession.id) {
           try {
             sandbox = await Sandbox.connect(activeSession.id);
             console.log(`Reconnected to sandbox ${activeSession.id}`);
+            needsNewSandbox = false;
             await redis.publish(
               `project:${projectId}`,
               JSON.stringify({ event: "SANDBOX_RECONNECTED", jobId })
@@ -109,32 +119,49 @@ async function main() {
               where: { id: activeSession.id },
               data: { status: "EXPIRED" },
             });
+            // needsNewSandbox remains true
           }
         }
 
-        // creating new sandbox if the active sandbox is not found
-        if (!activeSession || !activeSession.id) {
-          sandbox = await Sandbox.create("35say9dtojwu03w1zcm9");
-          const sandboxInfo = await sandbox.getInfo();
-          const newSandbox = await prisma.sandboxSession.create({
-            data: {
-              id: sandboxInfo.sandboxId,
-              projectId: projectId,
-              templateId: sandboxInfo.templateId,
-              status: "ACTIVE",
-            },
-          });
-          console.log(`Created new sandbox ${newSandbox.id}`);
-          await redis.publish(
-            `project:${projectId}`,
-            JSON.stringify({
-              event: "SANDBOX_CREATED",
-              sandboxId: newSandbox.id,
-              jobId,
-            })
-          );
+        // Create new sandbox if needed (no active session or reconnect failed)
+        if (needsNewSandbox) {
+          // Retry logic: try once, if fails retry twice, then fail gracefully
+          let retryCount = 0;
+          const maxRetries = 2;
 
-          await s3.populateSandbox(sandbox, project);
+          while (retryCount <= maxRetries) {
+            try {
+              sandbox = await Sandbox.create(E2B_TEMPLATE_ID);
+              const sandboxInfo = await sandbox.getInfo();
+              const newSandbox = await prisma.sandboxSession.create({
+                data: {
+                  id: sandboxInfo.sandboxId,
+                  projectId: projectId!,
+                  templateId: sandboxInfo.templateId,
+                  status: "ACTIVE",
+                },
+              });
+              console.log(`Created new sandbox ${newSandbox.id}`);
+              await redis.publish(
+                `project:${projectId}`,
+                JSON.stringify({
+                  event: "SANDBOX_CREATED",
+                  sandboxId: newSandbox.id,
+                  jobId,
+                })
+              );
+
+              await s3.populateSandbox(sandbox, project);
+              break;
+            } catch (sandboxError: any) {
+              retryCount++;
+              if (retryCount > maxRetries) {
+                console.error(`Failed to create sandbox after ${maxRetries + 1} attempts:`, sandboxError);
+                throw new Error(`Sandbox creation failed: ${sandboxError?.message || "Unknown error"}`);
+              }
+              console.log(`Sandbox creation attempt ${retryCount} failed, retrying...`);
+            }
+          }
         }
 
         const conversationHistory = await prisma.message.findMany({
@@ -192,33 +219,42 @@ async function main() {
 
         await prisma.message.create({
           data: {
-            projectId,
+            projectId: projectId!,
             role: "ASSISTANT",
             type: prompt?.type!,
             content: fullResponse
           }
         });
 
-        await s3.syncSandboxToS3(sandbox, project.s3basePath)
+        await s3.syncSandboxToS3(sandbox, project.s3basePath);
+
+        await redis.publish(
+          `project:${projectId}`,
+          JSON.stringify({ event: "FILES_SYNCED", jobId })
+        );
 
         // saving files diffs in changefile.
         if (prompt?.type === "EDIT" && changeSet) {
-          const changedFilesCount = fileChangesMap.size
+          const changedFilesCount = fileChangesMap.size;
 
           for (const [path, { oldContent, newContent }] of fileChangesMap.entries()) {
-            const diff = createTwoFilesPatch(path, path, oldContent, newContent, "", "")
+            const diff = createTwoFilesPatch(path, path, oldContent, newContent, "", "");
+
             await prisma.changeFile.create({
               data: {
                 changeSetId: changeSet?.id,
                 filePath: path,
                 diff: diff
               }
-            })
+            });
           }
 
-          fileChangesMap.clear()
+          fileChangesMap.clear();
 
-          await redis.publish(`project:${projectId}`, JSON.stringify({ event: "CHANGESET_CREATED", jobId, changedFilesCount }))
+          await redis.publish(
+            `project:${projectId}`,
+            JSON.stringify({ event: "CHANGESET_CREATED", jobId, changedFilesCount })
+          );
         }
 
         await prisma.job.update({
@@ -233,8 +269,33 @@ async function main() {
 
         console.log(`Finished job ${jobId}`);
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Worker error:", error);
+
+      if (jobId && projectId) {
+        try {
+          await prisma.job.update({
+            where: { id: jobId },
+            data: {
+              status: "FAILED",
+              errorMessage: error?.message || "Unknown error occurred"
+            }
+          });
+
+          await redis.publish(
+            `project:${projectId}`,
+            JSON.stringify({
+              event: "JOB_FAILED",
+              jobId,
+              error: error?.message || "Unknown error occurred"
+            })
+          );
+
+          console.log(`Job ${jobId} marked as FAILED`);
+        } catch (dbError) {
+          console.error("Failed to update job status to FAILED:", dbError);
+        }
+      }
     }
   }
 }
