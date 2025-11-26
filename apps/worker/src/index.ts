@@ -7,7 +7,7 @@ import * as s3 from "./s3";
 import dotenv from "dotenv";
 import { streamText } from "ai";
 import { SYSTEM_PROMPT } from "./prompt";
-import { fileChangesMap, setSandbox, TOOLS } from "./tools";
+import { fileChangesMap, setSandbox, setProjectId, TOOLS } from "./tools";
 import { createTwoFilesPatch } from "diff";
 dotenv.config();
 
@@ -180,7 +180,7 @@ async function main() {
         }));
 
         setSandbox(sandbox);
-
+        setProjectId(projectId!);
 
         //main llm logic here
         const response = streamText({

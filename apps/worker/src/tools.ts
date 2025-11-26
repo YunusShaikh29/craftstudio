@@ -1,15 +1,29 @@
-
 import { tool } from "ai";
 import { z } from "zod";
 import { Sandbox } from "@e2b/code-interpreter";
-import { diffLines } from "diff";
+import { redis } from "redis/redis";
 
 let sandboxRef: Sandbox | null = null;
+let currentProjectId: string | null = null;
+
 export function setSandbox(sandbox: Sandbox | null) {
   sandboxRef = sandbox;
 }
 
-export const fileChangesMap: Map<string, { oldContent: string, newContent: string, path: string }> = new Map()
+export function setProjectId(projectId: string | null) {
+  currentProjectId = projectId;
+}
+
+export const fileChangesMap: Map<string, { oldContent: string, newContent: string, path: string }> = new Map();
+
+async function publishFileUpdated(path: string, isNew: boolean) {
+  if (currentProjectId) {
+    await redis.publish(
+      `project:${currentProjectId}`,
+      JSON.stringify({ event: "FILE_UPDATED", path, isNew })
+    );
+  }
+}
 
 export const TOOLS = {
   listFiles: tool({
@@ -95,23 +109,36 @@ export const TOOLS = {
     inputSchema: z.object({
       path: z
         .string()
+        .min(1, "Path cannot be empty")
         .describe("File path (e.g., 'src/components/TodoList.tsx')."),
       content: z
         .string()
-        .describe("Full file content as string (TypeScript-valid).)"),
+        .describe("Full file content as string (TypeScript-valid)."),
     }),
     execute: async ({ path, content }) => {
       if (!sandboxRef) throw new Error("Sandbox not found");
-      let oldContent = "";
+      
       try {
-        oldContent = await sandboxRef.files.read(path)
-      } catch (error) {
-        oldContent = ""
+        let oldContent = "";
+        let isNew = true;
+        
+        try {
+          oldContent = await sandboxRef.files.read(path);
+          isNew = false;
+        } catch {
+          oldContent = "";
+        }
+       
+        fileChangesMap.set(path, { oldContent, newContent: content, path });
+        await sandboxRef.files.write(path, content);
+        
+        await publishFileUpdated(path, isNew);
+        
+        return { success: true, path, isNew };
+      } catch (error: any) {
+        console.error(`write-file error for ${path}:`, error);
+        return { success: false, error: error.message || "Failed to write file" };
       }
-     
-      fileChangesMap.set(path, { oldContent: oldContent, newContent: content, path: path })
-      await sandboxRef.files.write(path, content);
-      return { success: true, path };
     },
   }),
 
@@ -119,31 +146,49 @@ export const TOOLS = {
     name: "replace-lines",
     description: "Edit existing file: Replace specific lines with new content.",
     inputSchema: z.object({
-      path: z.string().describe("File path."),
-      startLine: z.number().describe("Starting line number (1-based)."),
-      endLine: z.number().describe("Ending line number."),
+      path: z.string().min(1, "Path cannot be empty").describe("File path."),
+      startLine: z.number().min(1, "Start line must be >= 1").describe("Starting line number (1-based)."),
+      endLine: z.number().min(1, "End line must be >= 1").describe("Ending line number."),
       newContent: z.string().describe("Replacement content."),
     }),
     execute: async ({ path, startLine, endLine, newContent }) => {
       if (!sandboxRef) throw new Error("Sandbox not initialized.");
-      let oldContent = "";
+      
       try {
-        oldContent = await sandboxRef.files.read(path);
-      } catch (error) {
-        oldContent = ""
+        if (startLine > endLine) {
+          return { success: false, error: "startLine must be <= endLine" };
+        }
+        
+        let oldContent = "";
+        try {
+          oldContent = await sandboxRef.files.read(path);
+        } catch {
+          return { success: false, error: `File not found: ${path}` };
+        }
+        
+        const lines = oldContent.split("\n");
+        
+        if (startLine > lines.length) {
+          return { success: false, error: `startLine ${startLine} exceeds file length ${lines.length}` };
+        }
+        
+        const updated =
+          lines.slice(0, startLine - 1).join("\n") +
+          "\n" +
+          newContent +
+          "\n" +
+          lines.slice(endLine).join("\n");
+          
+        fileChangesMap.set(path, { oldContent, newContent: updated, path });
+        await sandboxRef.files.write(path, updated);
+        
+        await publishFileUpdated(path, false);
+        
+        return { success: true, path, linesReplaced: endLine - startLine + 1 };
+      } catch (error: any) {
+        console.error(`replace-lines error for ${path}:`, error);
+        return { success: false, error: error.message || "Failed to replace lines" };
       }
-      const lines = oldContent.split("\n");
-      const updated =
-        lines.slice(0, startLine - 1).join("\n") +
-        "\n" +
-        newContent +
-        "\n" +
-        lines.slice(endLine).join("\n");
-        fileChangesMap.set(path, {
-          oldContent, newContent: updated, path: path
-        })
-      await sandboxRef.files.write(path, updated);
-      return { success: true };
     },
   }),
 
@@ -153,31 +198,40 @@ export const TOOLS = {
     inputSchema: z.object({
       package: z
         .string()
+        .min(1, "Package name cannot be empty")
         .describe("Package name/version (e.g., 'react-beautiful-dnd@latest')."),
       dev: z.boolean().optional().describe("Dev dependency? (default false)."),
     }),
     execute: async ({ package: pkg, dev }) => {
       if (!sandboxRef) throw new Error("Sandbox not initialized.");
       
-      const packagePath = "package.json";
-      let oldContent = "";
       try {
-        oldContent = await sandboxRef.files.read(packagePath);
-      } catch (error) {
-        // File didn't exist
-        oldContent = "";
+        const packagePath = "package.json";
+        let oldContent = "";
+        try {
+          oldContent = await sandboxRef.files.read(packagePath);
+        } catch {
+          oldContent = "";
+        }
+
+        const cmd = `npm install ${pkg}${dev ? " --save-dev" : ""}`;
+        const res = await sandboxRef.runCode(cmd);
+
+        const newContent = await sandboxRef.files.read(packagePath);
+        fileChangesMap.set(packagePath, { oldContent, newContent, path: packagePath });
+
+        await publishFileUpdated(packagePath, false);
+
+        return { 
+          success: true, 
+          package: pkg, 
+          dev: dev || false,
+          output: res.logs.stdout 
+        };
+      } catch (error: any) {
+        console.error(`add-dependency error for ${pkg}:`, error);
+        return { success: false, error: error.message || `Failed to install ${pkg}` };
       }
-
-      const cmd = `npm install ${pkg}${dev ? " --save-dev" : ""}`;
-      const res = await sandboxRef.runCode(cmd);
-
-      const newContent = await sandboxRef.files.read(packagePath);
-
-      // const diff = diffLines(oldContent, newContent);
-
-      fileChangesMap.set(packagePath, { oldContent, newContent, path: packagePath });
-
-      return { output: res.logs.stdout };
     },
   }),
 
@@ -209,23 +263,38 @@ export const TOOLS = {
     description:
       "Remove an npm dependency from the project (e.g., remove 'axios').",
     inputSchema: z.object({
-      package: z.string().describe("The package name to uninstall."),
+      package: z.string().min(1, "Package name cannot be empty").describe("The package name to uninstall."),
     }),
     execute: async ({ package: pkg }) => {
       if (!sandboxRef) throw new Error("Sandbox not initialized.");
 
       try {
+        const packagePath = "package.json";
+        let oldContent = "";
+        try {
+          oldContent = await sandboxRef.files.read(packagePath);
+        } catch {
+          oldContent = "";
+        }
+
         const exec = await sandboxRef.runCode(`npm uninstall ${pkg}`, {
           language: "bash",
         });
+
+        const newContent = await sandboxRef.files.read(packagePath);
+        fileChangesMap.set(packagePath, { oldContent, newContent, path: packagePath });
+
+        await publishFileUpdated(packagePath, false);
+
         return {
+          success: true,
+          package: pkg,
           stdout: exec.logs?.stdout || `Removed ${pkg}`,
           stderr: exec.logs?.stderr || "",
-          error: exec.error || null,
         };
       } catch (error: any) {
-        console.error("remove-dependency tool error:", error);
-        return { error: error.message || `Failed to uninstall ${pkg}` };
+        console.error(`remove-dependency error for ${pkg}:`, error);
+        return { success: false, error: error.message || `Failed to uninstall ${pkg}` };
       }
     },
   }),
