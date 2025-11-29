@@ -2,6 +2,8 @@
 
 import * as React from "react"
 import { ThemeProvider as NextThemesProvider } from "next-themes"
+import { Provider as ReduxProvider } from "react-redux"
+import { store } from "@/store/store"
 
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
@@ -12,7 +14,9 @@ export function Providers({ children }: { children: React.ReactNode }) {
       disableTransitionOnChange
       enableColorScheme
     >
-      {children}
+      <ReduxProvider store={store}>
+        {children}
+      </ReduxProvider>
     </NextThemesProvider>
   )
 }
