@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=Oxygen:wght@300;400;700&display=swap');
 @import "tailwindcss";
 @source "../../../apps/**/*.{ts,tsx}";
 @source "../../../components/**/*.{ts,tsx}";
@@ -6,6 +7,28 @@
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
+
+
+:root {
+  --font-primary: "Oxygen", sans-serif;
+  --font-secondary: "Inter", sans-serif;
+
+  /* For Tailwind font-sans usage */
+  --font-sans: var(--font-primary);
+}
+
+
+:root {
+  /* Gradient-based palette */
+  --color-soft-white: #fbffff;
+  --color-deep-plum: #2F2B32;
+  --color-warm-red: #F53434;
+  --color-pink: #E95478;
+  --color-charcoal: #1E1B1D;
+  --color-muted: #BBB4BB;
+}
+
+
 
 :root {
   --background: oklch(1 0 0);
@@ -78,7 +101,10 @@
   --sidebar-ring: oklch(0.439 0 0);
 }
 
+/* Tailwind theme hookup */
 @theme inline {
+  --font-sans: var(--font-primary);
+
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -103,10 +129,12 @@
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -122,6 +150,6 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground font-sans;
   }
 }

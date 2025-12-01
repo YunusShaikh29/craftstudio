@@ -2,7 +2,7 @@ import { createSlice, createAsyncThunk, PayloadAction } from "@reduxjs/toolkit"
 import axios from "axios"
 import type { User } from "@/lib/api/types"
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api/v0"
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"
 
 export interface AuthState {
   user: User | null
@@ -23,7 +23,7 @@ export const loginThunk = createAsyncThunk(
   "auth/login",
   async (email: string, { rejectWithValue }) => {
     try {
-      const { data } = await axios.post(`${API_URL}/auth/signin`, { email }, { withCredentials: true })
+      const { data } = await axios.post(`${API_URL}/api/v0/auth/signin`, { email }, { withCredentials: true })
       return data
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.error || "Failed to send magic link")

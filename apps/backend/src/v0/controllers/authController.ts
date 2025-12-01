@@ -47,7 +47,7 @@ export const signupOrSignin = async (req: Request, res: Response) => {
         subject: "Your Magic Sign-In Link",
         html: `
           <p>Click the link below to sign in:</p>
-          <a href="${magicLink}">Sign in</a>
+          <a href="${magicLink}">Sign in on CraftStudio</a>
           <p>This link expires in 15 minutes.</p>
         `,
       });
