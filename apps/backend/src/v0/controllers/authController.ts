@@ -103,7 +103,7 @@ export const verifyToken = async (req: Request, res: Response) => {
     });
 
     const FRONTEND_URL = requireEnv("FRONTEND_URL");
-    return res.redirect(303, new URL("/dashboard", FRONTEND_URL).toString());
+    return res.redirect(303, new URL("/", FRONTEND_URL).toString());
   } catch (error) {
     console.error("Error during token verification:", error);
     return res

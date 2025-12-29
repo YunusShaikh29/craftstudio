@@ -1,6 +1,6 @@
 import { NextFunction, Router, Response } from "express";
 import { isAuthenticated, AuthRequest } from "../middlewares/isAuthenticated";
-import { createOrEditProject } from "../controllers/projectController";
+import { createOrEditProject, getAllProjects, getProject } from "../controllers/projectController";
 
 const router: Router = Router();
 
@@ -13,5 +13,7 @@ const asyncHandler = (
 };
 
 router.post("/", isAuthenticated, asyncHandler(createOrEditProject));
+router.get("/getAll", isAuthenticated, asyncHandler(getAllProjects));
+router.get("/:id", isAuthenticated, asyncHandler(getProject));
 
 export { router as projectRouter };

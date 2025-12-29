@@ -1,5 +1,6 @@
 {
   "tailwindCSS.experimental.configFile": "packages/ui/src/styles/globals.css",
   "prisma-smart-formatter.typescript.defaultFormatter": "vscode.typescript-language-features",
-  "prisma-smart-formatter.typescriptreact.defaultFormatter": "vscode.typescript-language-features"
+  "prisma-smart-formatter.typescriptreact.defaultFormatter": "vscode.typescript-language-features",
+  "prisma.pinToPrisma6": true
 }

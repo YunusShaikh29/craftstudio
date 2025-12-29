@@ -6,6 +6,8 @@ import { redis } from "redis/redis";
 let sandboxRef: Sandbox | null = null;
 let currentProjectId: string | null = null;
 
+const SANDBOX_BASE_PATH = "/home/user";
+
 export function setSandbox(sandbox: Sandbox | null) {
   sandboxRef = sandbox;
 }
@@ -25,31 +27,104 @@ async function publishFileUpdated(path: string, isNew: boolean) {
   }
 }
 
+/**
+ * Normalize path to work with sandbox
+ * Converts relative paths to absolute sandbox paths
+ */
+function normalizePath(path: string): string {
+  // Remove leading ./ or /
+  let cleanPath = path.replace(/^\.\//, "").replace(/^\//, "");
+  
+  // If path doesn't start with /home/user, add it
+  if (!cleanPath.startsWith(SANDBOX_BASE_PATH)) {
+    return `${SANDBOX_BASE_PATH}/${cleanPath}`;
+  }
+  
+  return cleanPath;
+}
+
+
+function getRelativePath(fullPath: string): string {
+  return fullPath.replace(SANDBOX_BASE_PATH + '/', '').replace(/^\//, '');
+}
+
 export const TOOLS = {
   listFiles: tool({
     description:
-      "List files in the sandbox project with glob patterns (e.g., 'src/**/*.{ts,tsx}').",
+      "List files in the sandbox project. Returns TypeScript and JavaScript files from the project structure.",
     name: "list-files",
     inputSchema: z.object({
-      glob: z.string().describe("Glob pattern to match files."),
+      directory: z.string().optional().default("src").describe("Directory to list relative to project root (default: 'src')"),
     }),
-    execute: async ({ glob }) => {
+    execute: async ({ directory }) => {
       if (!sandboxRef) {
         throw new Error("Sandbox not found");
       }
-      const files = await sandboxRef.files.list(glob);
-      return { files };
+      try {
+        // Normalize the directory path
+        const fullPath = directory === '.' || directory === './' 
+          ? SANDBOX_BASE_PATH 
+          : normalizePath(directory);
+        
+        console.log(`[LIST FILES] Listing directory: ${fullPath}`);
+        
+        const allFiles = await sandboxRef.files.list(fullPath);
+        console.log(`[LIST FILES] Found ${allFiles.length} total items`);
+        
+        const relevantItems = allFiles.filter(f => {
+          if (f.path.includes('node_modules') || f.path.includes('/.')) {
+            return false;
+          }
+          
+          if (f.type === 'dir') {
+            return true;
+          }
+          
+          // relevant file types
+          return (
+            f.path.endsWith('.ts') || 
+            f.path.endsWith('.tsx') || 
+            f.path.endsWith('.js') || 
+            f.path.endsWith('.jsx') ||
+            f.path.endsWith('.json') ||
+            f.path.endsWith('.css') ||
+            f.path.endsWith('.html')
+          );
+        });
+        
+        // Convert to relative paths for cleaner output
+        const formattedFiles = relevantItems.map(f => ({
+          path: getRelativePath(f.path),
+          type: f.type,
+          size: f.size
+        }));
+        
+        console.log(`[LIST FILES] Found ${formattedFiles.length} relevant items`);
+        
+        return { 
+          files: formattedFiles.slice(0, 100), 
+          total: formattedFiles.length,
+          directory: getRelativePath(fullPath)
+        };
+      } catch (error: any) {
+        console.error("[LIST FILES] Error:", error?.message || error);
+        return { 
+          error: error?.message || "Failed to list files", 
+          files: [],
+          suggestion: "Try listing 'src' or '.' directory"
+        };
+      }
     },
   }),
 
   viewFile: tool({
     name: "view-file",
     description:
-      "Read file content from with optional line range for efficiency.",
+      "Read file content with optional line range for efficiency. Provide path relative to project root (e.g., 'src/App.tsx').",
     inputSchema: z.object({
       path: z
         .string()
-        .describe("Absolute path from project root (e.g., 'src/App.tsx')"),
+        .describe("Path relative to project root (e.g., 'src/App.tsx')"),
       startLine: z.number().optional().describe("Starting line (default 1)"),
       endLine: z
         .number()
@@ -58,136 +133,230 @@ export const TOOLS = {
     }),
     execute: async ({ path, startLine, endLine }) => {
       if (!sandboxRef) throw new Error("Sandbox not found");
-      const content = await sandboxRef.files.read(path);
-      if (startLine && endLine) {
-        const lines = content.split("\n").slice(startLine - 1, endLine);
-        return { content: lines.join("\n") };
+      
+      try {
+        const fullPath = normalizePath(path);
+        console.log(`[VIEW FILE] Reading: ${fullPath}`);
+        
+        const content = await sandboxRef.files.read(fullPath);
+        
+        if (startLine && endLine) {
+          const lines = content.split("\n").slice(startLine - 1, endLine);
+          return { 
+            content: lines.join("\n"),
+            path: getRelativePath(fullPath),
+            lines: `${startLine}-${endLine}`
+          };
+        }
+        
+        return { 
+          content,
+          path: getRelativePath(fullPath),
+          totalLines: content.split("\n").length
+        };
+      } catch (error: any) {
+        console.error(`[VIEW FILE] Error reading ${path}:`, error?.message);
+        return { 
+          error: `Failed to read file: ${error?.message || 'Unknown error'}`,
+          path 
+        };
       }
-      return { content };
     },
   }),
 
   searchFile: tool({
     name: "search-files",
     description:
-      "Search codebase using regex; filter with globs; case-insensitive by default.",
+      "Search codebase using regex. Searches in src directory by default.",
     inputSchema: z.object({
       query: z
         .string()
-        .describe("Regex or keyword to search (e.g., 'useState)."),
-      include: z
+        .describe("Regex or keyword to search (e.g., 'useState')."),
+      directory: z
         .string()
         .optional()
-        .describe("Glob include pattern (e.g., 'src/**')."),
-      exclude: z
-        .string()
-        .optional()
-        .describe("Glob exclude pattern (e.g., '**/*.test.*')."),
+        .default("src")
+        .describe("Directory to search in (default: 'src')"),
       caseSensitive: z
         .boolean()
         .optional()
-        .describe("Wether to match exactly."),
+        .describe("Whether to match exactly."),
     }),
-    execute: async ({ query, include, exclude, caseSensitive }) => {
+    execute: async ({ query, directory, caseSensitive }) => {
       if (!sandboxRef) throw new Error("Sandbox not found");
-      const files = await sandboxRef.files.list(include || "**/*");
-      const matches: any[] = [];
-      for (const file of files) {
-        if (exclude && file.name.includes(exclude)) continue;
-        const content = await sandboxRef.files.read(file.path);
-        const regex = new RegExp(query, caseSensitive ? "g" : "gi");
-        if (regex.test(content)) matches.push(file.path);
+
+      try {
+        const fullPath = normalizePath(directory);
+        console.log(`[SEARCH FILES] Searching in: ${fullPath}`);
+        
+        const files = await sandboxRef.files.list(fullPath);
+        const matches: Array<{ path: string; matchCount: number }> = [];
+
+        const sourceFiles = files.filter(f => 
+          f.type === 'file' && 
+          !f.path.includes('node_modules') &&
+          (f.path.endsWith('.ts') || 
+           f.path.endsWith('.tsx') || 
+           f.path.endsWith('.js') || 
+           f.path.endsWith('.jsx'))
+        );
+
+        // Limit search to prevent timeout
+        const filesToSearch = sourceFiles.slice(0, 50);
+
+        for (const file of filesToSearch) {
+          try {
+            const content = await sandboxRef.files.read(file.path);
+            const regex = new RegExp(query, caseSensitive ? "g" : "gi");
+            const matchArray = content.match(regex);
+            
+            if (matchArray && matchArray.length > 0) {
+              matches.push({
+                path: getRelativePath(file.path),
+                matchCount: matchArray.length
+              });
+            }
+          } catch {
+            continue;
+          }
+        }
+
+        console.log(`[SEARCH FILES] Found ${matches.length} files with matches`);
+
+        return {
+          matches,
+          query,
+          searchedFiles: filesToSearch.length,
+          totalFiles: sourceFiles.length
+        };
+      } catch (error: any) {
+        console.error("[SEARCH FILES] Error:", error?.message);
+        return { 
+          error: error?.message || "Failed to search files", 
+          matches: [] 
+        };
       }
-      return { matches };
     },
   }),
 
   writeFile: tool({
     name: "write-file",
     description:
-      "Create or overwrite a file; use for new components or configs.",
+      "Create or overwrite a file. Provide path relative to project root (e.g., 'src/components/TodoList.tsx').",
     inputSchema: z.object({
       path: z
         .string()
         .min(1, "Path cannot be empty")
-        .describe("File path (e.g., 'src/components/TodoList.tsx')."),
+        .describe("File path relative to project root (e.g., 'src/components/TodoList.tsx')."),
       content: z
         .string()
         .describe("Full file content as string (TypeScript-valid)."),
     }),
     execute: async ({ path, content }) => {
       if (!sandboxRef) throw new Error("Sandbox not found");
-      
+
       try {
+        const fullPath = normalizePath(path);
+        const relativePath = getRelativePath(fullPath);
+        
         let oldContent = "";
         let isNew = true;
-        
+
         try {
-          oldContent = await sandboxRef.files.read(path);
+          oldContent = await sandboxRef.files.read(fullPath);
           isNew = false;
         } catch {
           oldContent = "";
         }
-       
-        fileChangesMap.set(path, { oldContent, newContent: content, path });
-        await sandboxRef.files.write(path, content);
+
+        // Store both the full path and relative path for S3 sync
+        fileChangesMap.set(fullPath, { oldContent, newContent: content, path: fullPath });
         
-        await publishFileUpdated(path, isNew);
-        
-        return { success: true, path, isNew };
+        await sandboxRef.files.write(fullPath, content);
+        console.log(`[WRITE FILE] ${isNew ? 'Created' : 'Updated'}: ${relativePath}`);
+
+        await publishFileUpdated(relativePath, isNew);
+
+        return { 
+          success: true, 
+          path: relativePath,
+          fullPath,
+          isNew,
+          size: content.length
+        };
       } catch (error: any) {
-        console.error(`write-file error for ${path}:`, error);
-        return { success: false, error: error.message || "Failed to write file" };
+        console.error(`[WRITE FILE] Error for ${path}:`, error?.message);
+        return { 
+          success: false, 
+          error: error?.message || "Failed to write file",
+          path 
+        };
       }
     },
   }),
 
   replaceLines: tool({
     name: "replace-lines",
-    description: "Edit existing file: Replace specific lines with new content.",
+    description: "Edit existing file: Replace specific lines with new content. Provide path relative to project root.",
     inputSchema: z.object({
-      path: z.string().min(1, "Path cannot be empty").describe("File path."),
+      path: z.string().min(1, "Path cannot be empty").describe("File path relative to project root."),
       startLine: z.number().min(1, "Start line must be >= 1").describe("Starting line number (1-based)."),
       endLine: z.number().min(1, "End line must be >= 1").describe("Ending line number."),
       newContent: z.string().describe("Replacement content."),
     }),
     execute: async ({ path, startLine, endLine, newContent }) => {
       if (!sandboxRef) throw new Error("Sandbox not initialized.");
-      
+
       try {
         if (startLine > endLine) {
           return { success: false, error: "startLine must be <= endLine" };
         }
+
+        const fullPath = normalizePath(path);
+        const relativePath = getRelativePath(fullPath);
         
         let oldContent = "";
         try {
-          oldContent = await sandboxRef.files.read(path);
+          oldContent = await sandboxRef.files.read(fullPath);
         } catch {
-          return { success: false, error: `File not found: ${path}` };
+          return { success: false, error: `File not found: ${relativePath}` };
         }
-        
+
         const lines = oldContent.split("\n");
-        
+
         if (startLine > lines.length) {
-          return { success: false, error: `startLine ${startLine} exceeds file length ${lines.length}` };
+          return { 
+            success: false, 
+            error: `startLine ${startLine} exceeds file length ${lines.length}` 
+          };
         }
-        
+
         const updated =
           lines.slice(0, startLine - 1).join("\n") +
           "\n" +
           newContent +
           "\n" +
           lines.slice(endLine).join("\n");
-          
-        fileChangesMap.set(path, { oldContent, newContent: updated, path });
-        await sandboxRef.files.write(path, updated);
-        
-        await publishFileUpdated(path, false);
-        
-        return { success: true, path, linesReplaced: endLine - startLine + 1 };
+
+        fileChangesMap.set(fullPath, { oldContent, newContent: updated, path: fullPath });
+        await sandboxRef.files.write(fullPath, updated);
+
+        console.log(`[REPLACE LINES] Updated ${relativePath} (lines ${startLine}-${endLine})`);
+
+        await publishFileUpdated(relativePath, false);
+
+        return { 
+          success: true, 
+          path: relativePath,
+          fullPath,
+          linesReplaced: endLine - startLine + 1 
+        };
       } catch (error: any) {
-        console.error(`replace-lines error for ${path}:`, error);
-        return { success: false, error: error.message || "Failed to replace lines" };
+        console.error(`[REPLACE LINES] Error for ${path}:`, error?.message);
+        return { 
+          success: false, 
+          error: error?.message || "Failed to replace lines" 
+        };
       }
     },
   }),
@@ -204,56 +373,74 @@ export const TOOLS = {
     }),
     execute: async ({ package: pkg, dev }) => {
       if (!sandboxRef) throw new Error("Sandbox not initialized.");
-      
+
       try {
-        const packagePath = "package.json";
+        const packagePath = `${SANDBOX_BASE_PATH}/package.json`;
         let oldContent = "";
+        
         try {
           oldContent = await sandboxRef.files.read(packagePath);
         } catch {
           oldContent = "";
         }
 
-        const cmd = `npm install ${pkg}${dev ? " --save-dev" : ""}`;
-        const res = await sandboxRef.runCode(cmd);
+        const cmd = `cd ${SANDBOX_BASE_PATH} && npm install ${pkg}${dev ? " --save-dev" : ""}`;
+        console.log(`[ADD DEPENDENCY] Running: ${cmd}`);
+        
+        const res = await sandboxRef.runCode(cmd, { language: "bash" });
 
         const newContent = await sandboxRef.files.read(packagePath);
         fileChangesMap.set(packagePath, { oldContent, newContent, path: packagePath });
 
-        await publishFileUpdated(packagePath, false);
+        await publishFileUpdated("package.json", false);
 
-        return { 
-          success: true, 
-          package: pkg, 
+        console.log(`[ADD DEPENDENCY] ✓ Installed ${pkg}`);
+
+        return {
+          success: true,
+          package: pkg,
           dev: dev || false,
-          output: res.logs.stdout 
+          output: res.logs?.stdout || `Successfully installed ${pkg}`
         };
       } catch (error: any) {
-        console.error(`add-dependency error for ${pkg}:`, error);
-        return { success: false, error: error.message || `Failed to install ${pkg}` };
+        console.error(`[ADD DEPENDENCY] Error for ${pkg}:`, error?.message);
+        return { 
+          success: false, 
+          error: error?.message || `Failed to install ${pkg}` 
+        };
       }
     },
   }),
 
   runCommand: tool({
     name: "run-command",
-    description: 
-      "Execute shell commands inside the sandbox environment (like 'npm run build' or 'ls -la').",
+    description:
+      "Execute shell commands inside the sandbox environment (like 'npm run build' or 'ls -la'). Commands run from /home/user directory.",
     inputSchema: z.object({
       command: z.string().describe("The shell command to execute."),
     }),
     execute: async ({ command }) => {
       if (!sandboxRef) throw new Error("Sandbox not found");
+      
       try {
-        const exec = await sandboxRef.runCode(command, { language: "base" });
+        // Ensure commands run from the project directory
+        const fullCommand = `cd ${SANDBOX_BASE_PATH} && ${command}`;
+        console.log(`[RUN COMMAND] Executing: ${fullCommand}`);
+        
+        const exec = await sandboxRef.runCode(fullCommand, { language: "bash" });
+        
         return {
           stdout: exec.logs?.stdout || "No output.",
           stderr: exec.logs?.stderr || "",
           error: exec.error || null,
+          command: command
         };
       } catch (error: any) {
-        console.error("run-command tool error: ", error);
-        return { error: error.message || "failed to execute command" };
+        console.error("[RUN COMMAND] Error:", error?.message);
+        return { 
+          error: error?.message || "Failed to execute command",
+          command 
+        };
       }
     },
   }),
@@ -269,22 +456,26 @@ export const TOOLS = {
       if (!sandboxRef) throw new Error("Sandbox not initialized.");
 
       try {
-        const packagePath = "package.json";
+        const packagePath = `${SANDBOX_BASE_PATH}/package.json`;
         let oldContent = "";
+        
         try {
           oldContent = await sandboxRef.files.read(packagePath);
         } catch {
           oldContent = "";
         }
 
-        const exec = await sandboxRef.runCode(`npm uninstall ${pkg}`, {
-          language: "bash",
-        });
+        const cmd = `cd ${SANDBOX_BASE_PATH} && npm uninstall ${pkg}`;
+        console.log(`[REMOVE DEPENDENCY] Running: ${cmd}`);
+        
+        const exec = await sandboxRef.runCode(cmd, { language: "bash" });
 
         const newContent = await sandboxRef.files.read(packagePath);
         fileChangesMap.set(packagePath, { oldContent, newContent, path: packagePath });
 
-        await publishFileUpdated(packagePath, false);
+        await publishFileUpdated("package.json", false);
+
+        console.log(`[REMOVE DEPENDENCY] ✓ Removed ${pkg}`);
 
         return {
           success: true,
@@ -293,22 +484,12 @@ export const TOOLS = {
           stderr: exec.logs?.stderr || "",
         };
       } catch (error: any) {
-        console.error(`remove-dependency error for ${pkg}:`, error);
-        return { success: false, error: error.message || `Failed to uninstall ${pkg}` };
+        console.error(`[REMOVE DEPENDENCY] Error for ${pkg}:`, error?.message);
+        return { 
+          success: false, 
+          error: error?.message || `Failed to uninstall ${pkg}` 
+        };
       }
     },
   }),
-
-  //   readLogs: tool({
-  //     name: "readLogs",
-  //     description: "Read recent console logs from sandbox for debugging.",
-  //     inputSchema: z.object({
-  //       lines: z.number().optional().describe("Number of lines (default 50)."),
-  //     }),
-  //     execute: async ({ lines = 50 }) => {
-  //       if (!sandboxRef) throw new Error("Sandbox not initialized.");
-  //       const logs = await sandboxRef.logs.read(lines);
-  //       return { logs };
-  //     },
-  //   }),
 };

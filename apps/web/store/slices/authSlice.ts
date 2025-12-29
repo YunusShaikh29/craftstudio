@@ -35,7 +35,7 @@ export const getMeThunk = createAsyncThunk(
   "auth/getMe",
   async (_, { rejectWithValue }) => {
     try {
-      const { data } = await axios.get(`${API_URL}/auth/me`, { withCredentials: true })
+      const { data } = await axios.get(`${API_URL}/api/v0/auth/me`, { withCredentials: true })
       return data
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.error || "Not authenticated")
@@ -47,7 +47,7 @@ export const logoutThunk = createAsyncThunk(
   "auth/logout",
   async (_, { rejectWithValue }) => {
     try {
-      const { data } = await axios.post(`${API_URL}/auth/logout`, {}, { withCredentials: true })
+      const { data } = await axios.post(`${API_URL}/api/v0/auth/logout`, {}, { withCredentials: true })
       return data
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.error || "Failed to logout")

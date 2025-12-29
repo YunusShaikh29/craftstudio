@@ -18,21 +18,19 @@ export const createOrEditProject = async (
   if (!prompt) {
     return;
   }
-  console.log("control reached here 2");
   if (!projectId) {
     //create the project
-    console.log("control reached here 3");
+    console.log("control reached here to generate project for the first time");
     const openrouter = createOpenRouter({
       apiKey: process.env.OPENROUTER_API_KEY,
     });
-    console.log("control reachesd here");
     const response = streamText({
       model: openrouter("gpt-4o-mini"),
       messages: [
         {
           role: "system",
           content:
-            "You are a help full assistant which generates the project title based on the given prompt. Project title should be small, meaning full and based on the given prompt. If the prompt has random gibberish words, contains dangerous commands then do not generate any response, simply reply with error.",
+            "You are a help full assistant which generates the project title based on the given prompt. Project title should be small, meaning full and based on the given prompt. Project title should be a creative name based on the given prompt. If the prompt has random gibberish words, contains dangerous commands then do not generate any response, simply reply with error.",
         },
         { role: "user", content: prompt },
       ],
@@ -117,13 +115,21 @@ export const createOrEditProject = async (
     },
   });
 
-  const sandboxSession = await prisma.sandboxSession.findUnique({
-    where: {
-      id: sandboxId,
-      projectId: existingProject.id,
-      status: "ACTIVE",
-    },
-  });
+  console.log("active session id", sandboxId)
+
+  let sandboxSession = null;
+  if (sandboxId) {
+    sandboxSession = await prisma.sandboxSession.findUnique({
+      where: { id: sandboxId },
+    });
+    if (
+      !sandboxSession ||
+      sandboxSession.projectId !== existingProject.id ||
+      sandboxSession.status !== "ACTIVE"
+    ) {
+      sandboxSession = null;
+    }
+  }
 
   await addJobToQueue({
     jobId: job.id,
@@ -138,3 +144,68 @@ export const createOrEditProject = async (
     jobId: job.id,
   });
 };
+
+export const getAllProjects = async (req: AuthRequest, res: Response) => {
+  const userId = req.user?.id
+  if (!userId) {
+    res.status(400).json({ error: "Invalid request" })
+    return
+  }
+  try {
+    const projects = await prisma.project.findMany({
+      where: {
+        userId
+      }
+    })
+
+    if (!projects || projects.length === 0) {
+      res.status(404).json({ error: "No projects found" })
+      return
+    }
+
+    res.status(200).json({ projects })
+
+  } catch (error) {
+    console.error("Error getting all projects:", error)
+    res.status(500).json({ error: "Internal server error" })
+    return
+  }
+}
+
+
+export const getProject = async (req: AuthRequest, res: Response) => {
+  const { id } = req.params
+  const userId = req.user?.id
+
+  if (!id || !userId) {
+    res.status(400).json({ error: "Invalid request" })
+    return
+  }
+
+  try {
+    const project = await prisma.project.findUnique({
+      where: {
+        id,
+        userId
+      }, include: {
+        jobs: true,
+        messages: true,
+        sandboxSession: true,
+        changeSets: true,
+      }
+    })
+
+    if (!project) {
+      res.status(404).json({ error: "Project not found" })
+      return
+    }
+
+    res.status(200).json({ project })
+
+  } catch (error) {
+    console.error("Error getting project:", error)
+    res.status(500).json({ error: "Internal server error" })
+    return
+  }
+
+}
