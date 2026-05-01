@@ -13,9 +13,36 @@ import type { ModelMessage } from "ai";
 dotenv.config();
 
 const E2B_TEMPLATE_ID = "35say9dtojwu03w1zcm9";
+const SANDBOX_BASE_PATH = "/home/user";
+
 const openrouter = createOpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY || "",
 });
+
+/**
+ * Start the Vite dev server inside the sandbox and return the public preview URL.
+ * Safe to call on both new and reconnected sandboxes — kills any existing vite process first.
+ */
+async function startDevServer(sandbox: Sandbox, projectId: string, jobId: string): Promise<string> {
+  console.log(`[JOB ${jobId}] Starting Vite dev server...`);
+
+  // Kill any existing vite process so we get a clean start
+  await sandbox.runCode("pkill -f vite || true", { language: "bash" });
+  await new Promise((r) => setTimeout(r, 500));
+
+  // Start vite bound to all interfaces so E2B can expose it
+  const cmd = `cd ${SANDBOX_BASE_PATH} && nohup npm run dev -- --host 0.0.0.0 --port 5173 > /tmp/vite.log 2>&1 &`;
+  await sandbox.runCode(cmd, { language: "bash" });
+
+  // Give vite a moment to boot before we read the log / get the host
+  await new Promise((r) => setTimeout(r, 3000));
+
+  // getHost returns the public HTTPS URL E2B exposes for that port
+  const previewUrl = `https://${sandbox.getHost(5173)}`;
+  console.log(`[JOB ${jobId}] Dev server running at ${previewUrl}`);
+
+  return previewUrl;
+}
 
 async function main() {
   console.log("Worker started, waiting for jobs...");
@@ -42,9 +69,7 @@ async function main() {
         console.log(`[JOB ${jobId}] Processing job for project ${projectId}`);
 
         const prompt = await prisma.message.findFirst({
-          where: {
-            id: messageId,
-          },
+          where: { id: messageId },
           select: {
             content: true,
             role: true,
@@ -65,7 +90,6 @@ async function main() {
           JSON.stringify({ event: "JOB_STARTED", jobId })
         );
 
-        // changeset implementation here, if the message is of type Edit, create a changeset
         interface ChangeSet {
           id: string;
           projectId: string;
@@ -98,7 +122,9 @@ async function main() {
 
         let sandbox: Sandbox | null = null;
         let needsNewSandbox = true;
-        const e2bApiKey = process.env.E2B_API_KEY
+        let previewUrl: string | null = null;
+
+        const e2bApiKey = process.env.E2B_API_KEY;
         if (!e2bApiKey) {
           console.error("E2B API key is not set");
           return;
@@ -112,7 +138,7 @@ async function main() {
           },
         });
 
-        // if the sandbox is active, try to reconnect to it
+        // ── Try to reconnect to an existing sandbox ──────────────────────────
         if (activeSession && activeSession.id) {
           const reconnectStartTime = Date.now();
           try {
@@ -120,10 +146,40 @@ async function main() {
             const reconnectDuration = Date.now() - reconnectStartTime;
             console.log(`[JOB ${jobId}] Reconnected to sandbox ${activeSession.id} in ${reconnectDuration}ms`);
             needsNewSandbox = false;
+
+            // Re-use the stored preview URL if vite is already running,
+            // otherwise spin it up again and update the DB.
+            const logCheck = await sandbox.runCode("cat /tmp/vite.log 2>/dev/null | tail -5", { language: "bash" });
+            const viteRunning = logCheck.logs?.stdout?.includes("Local:") || logCheck.logs?.stdout?.includes("ready in");
+
+            if (viteRunning && activeSession.previewUrl) {
+              previewUrl = activeSession.previewUrl;
+              console.log(`[JOB ${jobId}] Vite already running, reusing URL: ${previewUrl}`);
+            } else {
+              previewUrl = await startDevServer(sandbox, projectId!, jobId!);
+              await prisma.sandboxSession.update({
+                where: { id: activeSession.id },
+                data: { previewUrl },
+              });
+            }
+
             await redis.publish(
               `project:${projectId}`,
-              JSON.stringify({ event: "SANDBOX_RECONNECTED", jobId, sandboxId: activeSession.id, duration: reconnectDuration })
+              JSON.stringify({
+                event: "SANDBOX_RECONNECTED",
+                jobId,
+                sandboxId: activeSession.id,
+                duration: reconnectDuration,
+                previewUrl,
+              })
             );
+
+            // Always emit PREVIEW_READY so the frontend iframe refreshes
+            await redis.publish(
+              `project:${projectId}`,
+              JSON.stringify({ event: "PREVIEW_READY", previewUrl, jobId })
+            );
+
           } catch (error) {
             const reconnectDuration = Date.now() - reconnectStartTime;
             console.log(
@@ -137,17 +193,20 @@ async function main() {
           }
         }
 
-        // Create new sandbox if needed (no active session or reconnect failed)
+        // ── Create a brand-new sandbox ────────────────────────────────────────
         if (needsNewSandbox) {
-          // Retry logic: try once, if fails retry two more, then fail gracefully
           let retryCount = 0;
           const maxRetries = 2;
 
           while (retryCount <= maxRetries) {
             try {
               const sandboxCreateStartTime = Date.now();
-              sandbox = await Sandbox.create(E2B_TEMPLATE_ID, { apiKey: e2bApiKey, timeoutMs: 1000 * 60 * 5 });
+              sandbox = await Sandbox.create(E2B_TEMPLATE_ID, {
+                apiKey: e2bApiKey,
+                timeoutMs: 1000 * 60 * 5,
+              });
               const sandboxInfo = await sandbox.getInfo();
+
               const newSandbox = await prisma.sandboxSession.create({
                 data: {
                   id: sandboxInfo.sandboxId,
@@ -159,17 +218,18 @@ async function main() {
               const sandboxCreateDuration = Date.now() - sandboxCreateStartTime;
               console.log(`[JOB ${jobId}] Created new sandbox ${newSandbox.id} in ${sandboxCreateDuration}ms`);
 
+              // Populate files from R2
               const populateStartTime = Date.now();
               const populatedCount = await s3.populateSandbox(sandbox, project);
               const populateDuration = Date.now() - populateStartTime;
-              console.log(`[JOB ${jobId}] Populated sandbox from S3 in ${populateDuration}ms (filesFound=${populatedCount})`);
+              console.log(`[JOB ${jobId}] Populated sandbox from R2 in ${populateDuration}ms (filesFound=${populatedCount})`);
 
-              // If S3 had no files (first time), push the initial sandbox template into S3
+              // If R2 had no files (first time), push the initial sandbox template
               if (populatedCount === 0) {
                 try {
-                  console.log(`[JOB ${jobId}] S3 empty for project ${projectId}, uploading initial sandbox template to S3...`);
+                  console.log(`[JOB ${jobId}] R2 empty for project ${projectId}, uploading initial sandbox template...`);
                   const uploaded = await s3.syncSandboxToS3(sandbox, project.s3basePath);
-                  console.log(`[JOB ${jobId}] Initial template uploaded ${uploaded.length} files to S3`);
+                  console.log(`[JOB ${jobId}] Initial template uploaded ${uploaded.length} files`);
                   await redis.publish(
                     `project:${projectId}`,
                     JSON.stringify({
@@ -177,7 +237,7 @@ async function main() {
                       jobId,
                       initialUpload: true,
                       filesUploaded: uploaded.length,
-                      uploadedKeys: uploaded.slice(0, 50)
+                      uploadedKeys: uploaded.slice(0, 50),
                     })
                   );
                 } catch (err) {
@@ -185,6 +245,12 @@ async function main() {
                 }
               }
 
+              // ── Start dev server & persist URL ──────────────────────────────
+              previewUrl = await startDevServer(sandbox, projectId!, jobId!);
+              await prisma.sandboxSession.update({
+                where: { id: newSandbox.id },
+                data: { previewUrl },
+              });
 
               await redis.publish(
                 `project:${projectId}`,
@@ -193,15 +259,22 @@ async function main() {
                   sandboxId: newSandbox.id,
                   jobId,
                   createDuration: sandboxCreateDuration,
-                  populateDuration: populateDuration,
+                  populateDuration,
+                  previewUrl,
                 })
               );
+
+              // Signal the frontend that the iframe can load
+              await redis.publish(
+                `project:${projectId}`,
+                JSON.stringify({ event: "PREVIEW_READY", previewUrl, jobId })
+              );
+
               break;
             } catch (sandboxError: any) {
               retryCount++;
               if (retryCount > maxRetries) {
                 console.error(`Failed to create sandbox after ${maxRetries + 1} attempts:`, sandboxError);
-                console.error(`Sandbox creation failed: ${sandboxError?.message || "Unknown error"}`);
                 continue;
               }
               console.log(`Sandbox creation attempt ${retryCount} failed, retrying...`);
@@ -210,30 +283,19 @@ async function main() {
         }
 
         const conversationHistory = await prisma.message.findMany({
-          where: {
-            projectId,
-          },
-          orderBy: {
-            createdAt: "asc",
-          },
+          where: { projectId },
+          orderBy: { createdAt: "asc" },
           take: 20,
         });
 
         const recentChangeSets = await prisma.changeSet.findMany({
-          where: {
-            projectId,
-          },
+          where: { projectId },
           include: {
             changeFiles: {
-              select: {
-                filePath: true,
-                diff: true,
-              },
+              select: { filePath: true, diff: true },
             },
           },
-          orderBy: {
-            createdAt: "desc",
-          },
+          orderBy: { createdAt: "desc" },
           take: 5,
         });
 
@@ -243,7 +305,7 @@ async function main() {
           for (const cs of recentChangeSets) {
             changeHistoryContext += `\n**Change Set:** ${cs.message}\n`;
             changeHistoryContext += `**Files Modified:** ${cs.changeFiles.length}\n`;
-            for (const cf of cs.changeFiles.slice(0, 5)) { // Limit to 3 files per change set
+            for (const cf of cs.changeFiles.slice(0, 5)) {
               changeHistoryContext += `- ${cf.filePath}\n`;
             }
             if (cs.changeFiles.length > 5) {
@@ -253,10 +315,9 @@ async function main() {
         }
 
         const messages: ModelMessage[] = conversationHistory.map((msg) => ({
-          role: msg.role === 'USER' ? 'user' : 'assistant',
+          role: msg.role === "USER" ? "user" : "assistant",
           content: msg.content,
         }));
-
 
         const lastMsg = messages[messages.length - 1];
         if (
@@ -275,10 +336,8 @@ async function main() {
         const llmStartTime = Date.now();
         console.log(`[JOB ${jobId}] Starting LLM execution`);
 
-        //main llm logic here
         const response = streamText({
           model: openrouter("gpt-4o-mini"),
-
           messages: [
             {
               role: "system",
@@ -302,16 +361,12 @@ async function main() {
         for await (const delta of response.fullStream) {
           if (delta.type === "text-delta") {
             textChunkCount++;
-            // process.stdout.write(delta.text);
-            // console.log(`[JOB ${jobId}] [TEXT #${textChunkCount}] ${delta.text}`);
             fullResponse += delta.text;
           } else if (delta.type === "tool-call") {
             toolCallCount++;
             const toolStartTime = Date.now();
             toolCallTimes.set(delta.toolCallId, toolStartTime);
-
-            const toolInput = 'input' in delta ? delta.input : (delta as any).args;
-
+            const toolInput = "input" in delta ? delta.input : (delta as any).args;
             console.log(`\n[JOB ${jobId}] [TOOL #${toolCallCount}] ${delta.toolName} started`);
             console.log(`[JOB ${jobId}] [TOOL INPUT] ${JSON.stringify(toolInput, null, 2)}`);
 
@@ -329,7 +384,7 @@ async function main() {
             toolCallTimes.delete(delta.toolCallId);
 
             const resultStr = JSON.stringify(delta, null, 2);
-            console.log(`[JOB ${jobId}] [TOOL RESULT] ${resultStr.slice(0, 500)}${resultStr.length > 500 ? '...' : ''}`);
+            console.log(`[JOB ${jobId}] [TOOL RESULT] ${resultStr.slice(0, 500)}${resultStr.length > 500 ? "..." : ""}`);
 
             await redis.publish(
               `project:${projectId}`,
@@ -341,6 +396,18 @@ async function main() {
               })
             );
             console.log(`[JOB ${jobId}] [TOOL] ${delta.toolCallId}:${delta.toolName} completed in ${toolDuration}ms\n`);
+
+            // After any write-file / replace-lines, re-emit PREVIEW_READY
+            // so the frontend knows to reload the iframe
+            if (
+              (delta.toolName === "write-file" || delta.toolName === "replace-lines") &&
+              previewUrl
+            ) {
+              await redis.publish(
+                `project:${projectId}`,
+                JSON.stringify({ event: "PREVIEW_READY", previewUrl, jobId })
+              );
+            }
           } else if (delta.type === "finish") {
             console.log(`[JOB ${jobId}] [FINISH] Reason: ${delta.finishReason}`);
             console.log(`[JOB ${jobId}] [STATS] Total tools called: ${toolCallCount}, Text chunks: ${textChunkCount}`);
@@ -360,26 +427,22 @@ async function main() {
             projectId: projectId!,
             role: "ASSISTANT",
             type: prompt?.type!,
-            content: fullResponse
-          }
+            content: fullResponse,
+          },
         });
-        console.log(`[JOB ${jobId}] Assistant message saved to database: ${fullResponse}`);
 
-        const s3SyncStartTime = Date.now();
+        // ── Sync changed files to R2 ─────────────────────────────────────────
         const changedFilePaths = Array.from(fileChangesMap.keys());
-
         if (changedFilePaths.length > 0) {
-
-          console.log(`[JOB ${jobId}] Syncing ${changedFilePaths.length} changed files to S3...`);
-
+          console.log(`[JOB ${jobId}] Syncing ${changedFilePaths.length} changed files to R2...`);
+          const s3SyncStartTime = Date.now();
           const uploadedKeys = await s3.syncSandboxToS3(
             sandbox,
             project.s3basePath,
-            changedFilePaths.length > 0 ? changedFilePaths : undefined
+            changedFilePaths
           );
-
           const s3SyncDuration = Date.now() - s3SyncStartTime;
-          console.log(`[JOB ${jobId}] S3 sync completed in ${s3SyncDuration}ms - uploaded ${uploadedKeys.length} files`);
+          console.log(`[JOB ${jobId}] R2 sync completed in ${s3SyncDuration}ms - uploaded ${uploadedKeys.length} files`);
 
           await redis.publish(
             `project:${projectId}`,
@@ -388,33 +451,27 @@ async function main() {
               jobId,
               duration: s3SyncDuration,
               filesUploaded: uploadedKeys.length,
-              uploadedKeys: uploadedKeys.slice(0, 20) 
+              uploadedKeys: uploadedKeys.slice(0, 20),
             })
           );
         } else {
-          console.log(`[JOB ${jobId}, No files changed, skipping S3 sync!]`)
+          console.log(`[JOB ${jobId}] No files changed, skipping R2 sync.`);
         }
 
-
+        // ── Finalise changeset ────────────────────────────────────────────────
         if (prompt?.type === "EDIT" && changeSet) {
           const changedFilesCount = fileChangesMap.size;
           const changeFileStartTime = Date.now();
 
           for (const [path, { oldContent, newContent }] of fileChangesMap.entries()) {
             const diff = createTwoFilesPatch(path, path, oldContent, newContent, "", "");
-
             await prisma.changeFile.create({
-              data: {
-                changeSetId: changeSet?.id,
-                filePath: path,
-                diff: diff
-              }
+              data: { changeSetId: changeSet.id, filePath: path, diff },
             });
           }
 
           const changeFileDuration = Date.now() - changeFileStartTime;
           console.log(`[JOB ${jobId}] ChangeSet ${changeSet.id} finalized: ${changedFilesCount} files changed (${changeFileDuration}ms)`);
-
           fileChangesMap.clear();
 
           await redis.publish(
@@ -423,7 +480,7 @@ async function main() {
               event: "CHANGESET_CREATED",
               jobId,
               changedFilesCount,
-              changeSetId: changeSet.id
+              changeSetId: changeSet.id,
             })
           );
         }
@@ -438,7 +495,7 @@ async function main() {
 
         await redis.publish(
           `project:${projectId}`,
-          JSON.stringify({ event: "JOB_COMPLETED", jobId, duration: totalJobDuration })
+          JSON.stringify({ event: "JOB_COMPLETED", jobId, duration: totalJobDuration, previewUrl })
         );
       }
     } catch (error: any) {
@@ -454,7 +511,7 @@ async function main() {
               status: "FAILED",
               errorMessage: error?.message || "Unknown error occurred",
               completedAt: new Date(),
-            }
+            },
           });
 
           await redis.publish(

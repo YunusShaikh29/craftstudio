@@ -3,32 +3,34 @@ import type { Sandbox } from "@e2b/code-interpreter";
 import type { Project } from "database/client";
 import { Readable } from "stream";
 
-const s3Client = new S3Client({
-  region: process.env.AWS_REGION!,
+
+const r2Client = new S3Client({
+  region: "auto", // R2 doesn't use regions — always set to "auto"
+  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
   credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+    accessKeyId: process.env.R2_ACCESS_KEY!,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
   },
 });
 
-const BUCKET_NAME = process.env.S3_BUCKET_NAME || "craftstudio-projects";
+const BUCKET_NAME = process.env.R2_BUCKET_NAME || "craftstudio-projects";
 const SANDBOX_BASE_PATH = "/home/user";
 
 /**
- * List low-level objects in S3 under prefix
+ * List low-level objects in R2 under prefix
  */
 export async function listFiles(prefix: string) {
   const command = new ListObjectsV2Command({
     Bucket: BUCKET_NAME,
     Prefix: prefix,
   });
-  const response = await s3Client.send(command);
+  const response = await r2Client.send(command);
   return (response.Contents || []).map((obj) => obj.Key!).filter(Boolean);
 }
 
 export async function downloadFile(key: string): Promise<string> {
   const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: key });
-  const response = await s3Client.send(command);
+  const response = await r2Client.send(command);
   return new Promise((resolve, reject) => {
     const stream = response.Body as Readable;
     let data = "";
@@ -44,20 +46,20 @@ export async function uploadFile(key: string, body: string) {
     Key: key,
     Body: body,
   });
-  await s3Client.send(command);
+  await r2Client.send(command);
 }
 
 /**
- * Populate sandbox from s3. Returns number of files populated.
+ * Populate sandbox from R2. Returns number of files populated.
  */
 export async function populateSandbox(sandbox: Sandbox, project: Project): Promise<number> {
-  const s3Keys = await listFiles(project.s3basePath || "");
-  console.log(`Found ${s3Keys.length} files in S3 for population.`);
+  const r2Keys = await listFiles(project.s3basePath || "");
+  console.log(`Found ${r2Keys.length} files in R2 for population.`);
 
-  if (s3Keys.length === 0) return 0;
+  if (r2Keys.length === 0) return 0;
 
   await Promise.all(
-    s3Keys.map(async (key) => {
+    r2Keys.map(async (key) => {
       try {
         // derive relative path by removing prefix
         const rel = key.replace(project.s3basePath, "").replace(/^\//, "");
@@ -74,7 +76,7 @@ export async function populateSandbox(sandbox: Sandbox, project: Project): Promi
     })
   );
 
-  return s3Keys.length;
+  return r2Keys.length;
 }
 
 
@@ -109,10 +111,10 @@ async function recursiveListFiles(sandbox: Sandbox, dirPath: string): Promise<st
 }
 
 /**
- * Sync sandbox back to S3.
+ * Sync sandbox back to R2.
  * - If changedFiles array is provided, sync only those.
  * - Otherwise fallback to recursive directory listing.
- * Returns array of uploaded S3 keys.
+ * Returns array of uploaded R2 keys.
  */
 export async function syncSandboxToS3(
   sandbox: Sandbox | null,
@@ -120,7 +122,7 @@ export async function syncSandboxToS3(
   changedFiles?: string[]
 ): Promise<string[]> {
   if (!sandbox) {
-    console.log("[S3 SYNC] No sandbox provided");
+    console.log("[R2 SYNC] No sandbox provided");
     return [];
   }
 
@@ -132,9 +134,9 @@ export async function syncSandboxToS3(
 
   if (changedFiles && changedFiles.length > 0) {
     filesToUpload = changedFiles.filter((p) => p.startsWith(SANDBOX_BASE_PATH));
-    console.log(`[S3 SYNC] Using changed files list: ${filesToUpload.length} files`);
+    console.log(`[R2 SYNC] Using changed files list: ${filesToUpload.length} files`);
   } else {
-    console.log("[S3 SYNC] No changed files provided, listing all project files...");
+    console.log("[R2 SYNC] No changed files provided, listing all project files...");
 
     try {
       filesToUpload = await recursiveListFiles(sandbox, SANDBOX_BASE_PATH);
@@ -143,7 +145,6 @@ export async function syncSandboxToS3(
       filesToUpload = filesToUpload.filter(path => {
         const fileName = path.split('/').pop() || '';
 
-        // Include these files/directories
         return (
           path.includes('/src/') ||
           path.includes('/public/') ||
@@ -162,15 +163,15 @@ export async function syncSandboxToS3(
         );
       });
 
-      console.log(`[S3 SYNC] Found ${filesToUpload.length} project files after filtering`);
+      console.log(`[R2 SYNC] Found ${filesToUpload.length} project files after filtering`);
     } catch (err) {
-      console.error("[S3 SYNC] Failed to list files:", err);
+      console.error("[R2 SYNC] Failed to list files:", err);
       return [];
     }
   }
 
   if (filesToUpload.length === 0) {
-    console.log("[S3 SYNC] No files to upload.");
+    console.log("[R2 SYNC] No files to upload.");
     return [];
   }
 
@@ -185,14 +186,14 @@ export async function syncSandboxToS3(
       await uploadFile(key, content);
       uploadedKeys.push(key);
 
-      console.log(`[S3 SYNC] Uploaded: ${relativePath}`);
+      console.log(`[R2 SYNC] Uploaded: ${relativePath}`);
     } catch (err: any) {
-      console.error(`[S3 SYNC] Failed upload ${fullPath}:`, err?.message || err);
+      console.error(`[R2 SYNC] Failed upload ${fullPath}:`, err?.message || err);
     }
   });
 
   await Promise.all(uploadPromises);
 
-  console.log(`[S3 SYNC] Uploaded ${uploadedKeys.length}/${filesToUpload.length} files.`);
+  console.log(`[R2 SYNC] Uploaded ${uploadedKeys.length}/${filesToUpload.length} files.`);
   return uploadedKeys;
 }

@@ -492,4 +492,35 @@ export const TOOLS = {
       }
     },
   }),
+  runDevServer: tool({
+    name: "run-dev-server",
+    description: "Start the Vite dev server on port 5173",
+    inputSchema: z.object({}),
+    execute: async () => {
+      if(!sandboxRef) throw new Error("Sandbox not initialized.")
+
+      try {
+        await sandboxRef.runCode("pkill -f 'vite'", { language: "bash" });
+
+        const cmd = `cd ${SANDBOX_BASE_PATH} && nohup npm run dev > /tmp/vite.log 2>&1 &`
+        await sandboxRef.runCode(cmd, {language: "bash"})
+
+        await new Promise(resolve => setTimeout(resolve, 3000))
+        const url = sandboxRef.getHost(5173)
+
+        console.log(`[RUN DEV SERVER] Started at ${url}`);
+        
+        return {
+          success: true,
+          url,
+          port: 5173
+        }
+
+      } catch (error) {
+        console.error("[RUN DEV SERVER] Error:", (error as any).message);
+        return {success: false, error: error || "Failed to start dev server"}
+      }
+    }
+
+  })
 };

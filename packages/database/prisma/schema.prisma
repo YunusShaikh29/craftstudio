@@ -85,6 +85,7 @@ model sandboxSession {
   endedAt DateTime?
   errorMessage String?
   log String?
+  previewUrl String?
 
   project Project @relation(fields: [projectId], references: [id])
 }
