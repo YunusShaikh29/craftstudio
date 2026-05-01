@@ -60,6 +60,8 @@ export async function populateSandbox(sandbox: Sandbox, project: Project): Promi
 
   await Promise.all(
     r2Keys.map(async (key) => {
+      if (key.includes('.wh.')) return;
+
       try {
         // derive relative path by removing prefix
         const rel = key.replace(project.s3basePath, "").replace(/^\//, "");
@@ -90,6 +92,7 @@ async function recursiveListFiles(sandbox: Sandbox, dirPath: string): Promise<st
       // Skip unwanted directories
       if (item.path.includes('node_modules') ||
         item.path.includes('.npm') ||
+        item.path.includes('.wh.') ||
         item.path.startsWith('/home/user/.bash') ||
         item.path.startsWith('/home/user/.profile')) {
         continue;

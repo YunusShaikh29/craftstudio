@@ -26,21 +26,51 @@ const openrouter = createOpenRouter({
 async function startDevServer(sandbox: Sandbox, projectId: string, jobId: string): Promise<string> {
   console.log(`[JOB ${jobId}] Starting Vite dev server...`);
 
-  // Kill any existing vite process so we get a clean start
-  await sandbox.runCode("pkill -f vite || true", { language: "bash" });
+  // Wait a moment for the sandbox kernel to be fully ready
+  await new Promise((r) => setTimeout(r, 1000));
+
+  // Use sandbox.commands.run instead of runCode for shell ops — more reliable
+  // and doesn't depend on the Jupyter kernel.
+  try {
+    await sandbox.commands.run("pkill -f vite || true", { timeoutMs: 5000 });
+  } catch (err) {
+    console.log(`[JOB ${jobId}] pkill warning (safe to ignore):`, (err as any)?.message);
+  }
+
   await new Promise((r) => setTimeout(r, 500));
 
-  // Start vite bound to all interfaces so E2B can expose it
+  // Start vite in background — use commands.run with background:true if available,
+  // otherwise nohup + & works fine.
   const cmd = `cd ${SANDBOX_BASE_PATH} && nohup npm run dev -- --host 0.0.0.0 --port 5173 > /tmp/vite.log 2>&1 &`;
-  await sandbox.runCode(cmd, { language: "bash" });
+  
+  try {
+    await sandbox.commands.run(cmd, { timeoutMs: 10000, background: true });
+  } catch (err) {
+    // Fallback to runCode if commands.run isn't available in your SDK version
+    console.log(`[JOB ${jobId}] commands.run failed, falling back to runCode`);
+    await sandbox.runCode(cmd, { language: "bash" });
+  }
 
-  // Give vite a moment to boot before we read the log / get the host
-  await new Promise((r) => setTimeout(r, 3000));
+  // Poll the vite log until it reports "ready" instead of fixed-sleep
+  let viteReady = false;
+  for (let i = 0; i < 15; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    try {
+      const log = await sandbox.commands.run("cat /tmp/vite.log 2>/dev/null || true");
+      const out = log.stdout || "";
+      if (out.includes("ready in") || out.includes("Local:")) {
+        viteReady = true;
+        break;
+      }
+    } catch {}
+  }
 
-  // getHost returns the public HTTPS URL E2B exposes for that port
+  if (!viteReady) {
+    console.warn(`[JOB ${jobId}] Vite did not report ready within 15s, continuing anyway`);
+  }
+
   const previewUrl = `https://${sandbox.getHost(5173)}`;
-  console.log(`[JOB ${jobId}] Dev server running at ${previewUrl}`);
-
+  console.log(`[JOB ${jobId}] Dev server URL: ${previewUrl}`);
   return previewUrl;
 }
 
@@ -197,8 +227,9 @@ async function main() {
         if (needsNewSandbox) {
           let retryCount = 0;
           const maxRetries = 2;
-
-          while (retryCount <= maxRetries) {
+          let sandboxCreated = false;
+        
+          while (retryCount <= maxRetries && !sandboxCreated) {
             try {
               const sandboxCreateStartTime = Date.now();
               sandbox = await Sandbox.create(E2B_TEMPLATE_ID, {
@@ -206,7 +237,7 @@ async function main() {
                 timeoutMs: 1000 * 60 * 5,
               });
               const sandboxInfo = await sandbox.getInfo();
-
+        
               const newSandbox = await prisma.sandboxSession.create({
                 data: {
                   id: sandboxInfo.sandboxId,
@@ -217,41 +248,37 @@ async function main() {
               });
               const sandboxCreateDuration = Date.now() - sandboxCreateStartTime;
               console.log(`[JOB ${jobId}] Created new sandbox ${newSandbox.id} in ${sandboxCreateDuration}ms`);
-
-              // Populate files from R2
+        
+              // Populate from R2
               const populateStartTime = Date.now();
               const populatedCount = await s3.populateSandbox(sandbox, project);
               const populateDuration = Date.now() - populateStartTime;
-              console.log(`[JOB ${jobId}] Populated sandbox from R2 in ${populateDuration}ms (filesFound=${populatedCount})`);
-
-              // If R2 had no files (first time), push the initial sandbox template
+              console.log(`[JOB ${jobId}] Populated sandbox in ${populateDuration}ms (filesFound=${populatedCount})`);
+        
               if (populatedCount === 0) {
                 try {
-                  console.log(`[JOB ${jobId}] R2 empty for project ${projectId}, uploading initial sandbox template...`);
                   const uploaded = await s3.syncSandboxToS3(sandbox, project.s3basePath);
                   console.log(`[JOB ${jobId}] Initial template uploaded ${uploaded.length} files`);
-                  await redis.publish(
-                    `project:${projectId}`,
-                    JSON.stringify({
-                      event: "FILES_SYNCED",
-                      jobId,
-                      initialUpload: true,
-                      filesUploaded: uploaded.length,
-                      uploadedKeys: uploaded.slice(0, 50),
-                    })
-                  );
                 } catch (err) {
                   console.error(`[JOB ${jobId}] Failed initial template upload:`, err);
                 }
               }
-
-              // ── Start dev server & persist URL ──────────────────────────────
-              previewUrl = await startDevServer(sandbox, projectId!, jobId!);
-              await prisma.sandboxSession.update({
-                where: { id: newSandbox.id },
-                data: { previewUrl },
-              });
-
+        
+              // ── Sandbox itself is healthy at this point ──
+              sandboxCreated = true;
+        
+              // ── Try to start dev server, but DON'T retry the whole sandbox if this fails ──
+              try {
+                previewUrl = await startDevServer(sandbox, projectId!, jobId!);
+                await prisma.sandboxSession.update({
+                  where: { id: newSandbox.id },
+                  data: { previewUrl },
+                });
+              } catch (devErr: any) {
+                console.error(`[JOB ${jobId}] Dev server failed to start:`, devErr?.message);
+                previewUrl = null; // continue the job; preview just won't be available
+              }
+        
               await redis.publish(
                 `project:${projectId}`,
                 JSON.stringify({
@@ -263,21 +290,21 @@ async function main() {
                   previewUrl,
                 })
               );
-
-              // Signal the frontend that the iframe can load
-              await redis.publish(
-                `project:${projectId}`,
-                JSON.stringify({ event: "PREVIEW_READY", previewUrl, jobId })
-              );
-
-              break;
+        
+              if (previewUrl) {
+                await redis.publish(
+                  `project:${projectId}`,
+                  JSON.stringify({ event: "PREVIEW_READY", previewUrl, jobId })
+                );
+              }
+        
             } catch (sandboxError: any) {
               retryCount++;
+              console.log(`[JOB ${jobId}] Sandbox creation attempt ${retryCount} failed:`, sandboxError?.message);
               if (retryCount > maxRetries) {
-                console.error(`Failed to create sandbox after ${maxRetries + 1} attempts:`, sandboxError);
-                continue;
+                console.error(`[JOB ${jobId}] Failed to create sandbox after ${maxRetries + 1} attempts`);
+                throw sandboxError; // propagate so job is marked FAILED
               }
-              console.log(`Sandbox creation attempt ${retryCount} failed, retrying...`);
             }
           }
         }

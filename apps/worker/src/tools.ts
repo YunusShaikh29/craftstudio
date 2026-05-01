@@ -297,65 +297,83 @@ export const TOOLS = {
 
   replaceLines: tool({
     name: "replace-lines",
-    description: "Edit existing file: Replace specific lines with new content. Provide path relative to project root.",
+    description: "Edit existing file: Replace specific lines with new content.",
     inputSchema: z.object({
-      path: z.string().min(1, "Path cannot be empty").describe("File path relative to project root."),
-      startLine: z.number().min(1, "Start line must be >= 1").describe("Starting line number (1-based)."),
-      endLine: z.number().min(1, "End line must be >= 1").describe("Ending line number."),
-      newContent: z.string().describe("Replacement content."),
+      path: z.string().min(1),
+      startLine: z.number().min(1),
+      endLine: z.number().min(1),
+      newContent: z.string(),
     }),
     execute: async ({ path, startLine, endLine, newContent }) => {
       if (!sandboxRef) throw new Error("Sandbox not initialized.");
-
+  
       try {
         if (startLine > endLine) {
           return { success: false, error: "startLine must be <= endLine" };
         }
-
+  
         const fullPath = normalizePath(path);
         const relativePath = getRelativePath(fullPath);
-        
+  
         let oldContent = "";
         try {
           oldContent = await sandboxRef.files.read(fullPath);
         } catch {
           return { success: false, error: `File not found: ${relativePath}` };
         }
-
-        const lines = oldContent.split("\n");
-
-        if (startLine > lines.length) {
-          return { 
-            success: false, 
-            error: `startLine ${startLine} exceeds file length ${lines.length}` 
+  
+        const originalLines = oldContent.split("\n");
+  
+        if (startLine > originalLines.length) {
+          return {
+            success: false,
+            error: `startLine ${startLine} exceeds file length ${originalLines.length}`,
           };
         }
-
-        const updated =
-          lines.slice(0, startLine - 1).join("\n") +
-          "\n" +
-          newContent +
-          "\n" +
-          lines.slice(endLine).join("\n");
-
-        fileChangesMap.set(fullPath, { oldContent, newContent: updated, path: fullPath });
-        await sandboxRef.files.write(fullPath, updated);
-
-        console.log(`[REPLACE LINES] Updated ${relativePath} (lines ${startLine}-${endLine})`);
-
+  
+        // Normalize escaped newlines
+        const normalizedContent = newContent
+          .replace(/\\n/g, "\n")
+          .replace(/\\t/g, "\t");
+  
+        // Always treat as multi-line
+        const newLines = normalizedContent.split("\n");
+  
+        // Proper splice instead of string concat
+        const updatedLines = [
+          ...originalLines.slice(0, startLine - 1),
+          ...newLines,
+          ...originalLines.slice(endLine),
+        ];
+  
+        const updatedContent = updatedLines.join("\n");
+  
+        fileChangesMap.set(fullPath, {
+          oldContent,
+          newContent: updatedContent,
+          path: fullPath,
+        });
+  
+        await sandboxRef.files.write(fullPath, updatedContent);
+  
+        console.log(
+          `[REPLACE LINES] Updated ${relativePath} (lines ${startLine}-${endLine}, inserted ${newLines.length} lines)`
+        );
+  
         await publishFileUpdated(relativePath, false);
-
-        return { 
-          success: true, 
+  
+        return {
+          success: true,
           path: relativePath,
           fullPath,
-          linesReplaced: endLine - startLine + 1 
+          linesReplaced: endLine - startLine + 1,
+          linesInserted: newLines.length,
         };
       } catch (error: any) {
         console.error(`[REPLACE LINES] Error for ${path}:`, error?.message);
-        return { 
-          success: false, 
-          error: error?.message || "Failed to replace lines" 
+        return {
+          success: false,
+          error: error?.message || "Failed to replace lines",
         };
       }
     },
