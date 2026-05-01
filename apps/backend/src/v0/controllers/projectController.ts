@@ -5,7 +5,20 @@ import { streamText } from "ai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { addJobToQueue } from "redis/queue";
 import dotenv from "dotenv";
+import { GetObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
+import { Readable } from "stream";
 dotenv.config();
+
+
+const s3Client = new S3Client({
+  region: process.env.AWS_REGION!,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+  },
+});
+
+const BUCKET_NAME = process.env.BUCKET_NAME || "craftstudio"
 
 export const createOrEditProject = async (
   req: AuthRequest,
@@ -209,3 +222,123 @@ export const getProject = async (req: AuthRequest, res: Response) => {
   }
 
 }
+
+export const getFiles = async (req: AuthRequest, res: Response) => {
+  const { id } = req.params
+  const userId = req.user?.id
+
+  if (!id || !userId) {
+    res.status(400).json({ error: "Invalid request" })
+    return
+  }
+
+
+
+  const project = await prisma.project.findUnique({
+    where: {
+      id,
+      userId
+    }
+  })
+
+  if (!project) {
+    res.status(404).json({ error: "Project not found" })
+    return
+  }
+
+  //listing all the files
+  const command = new ListObjectsV2Command({
+    Bucket: BUCKET_NAME,
+    Prefix: project.s3basePath
+  })
+
+  try {
+
+    const response = await s3Client.send(command)
+    const files = (response.Contents || []).map((obj) => (
+      {
+        path: obj.Key!.replace(project.s3basePath, "").replace(/^\//, ""),
+        size: obj.Size || 0,
+        lastModified: obj.LastModified
+      }
+    )).filter(f => f.path && !f.path.includes("node_modules"))
+
+    res.status(200).json({ files })
+
+  } catch (error) {
+    console.log("Error listing files", error)
+    res.status(500).json({ error: "Failed to list files" })
+  }
+
+}
+
+
+export const getFileContent = async (req: AuthRequest, res: Response) => {
+  try {
+    const { id: projectId } = req.params;
+    const userId = req.user?.id;
+
+    if (!userId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return
+    }
+
+    // Express 5 named wildcard from /:id/files/*filePath
+    const filePathParam = req.params.filePath;
+    const filePath = Array.isArray(filePathParam)
+      ? filePathParam.join("/")
+      : filePathParam || "";
+
+    if (!filePath) {
+      res.status(400).json({ error: "File path is required" });
+      return
+    }
+
+    const project = await prisma.project.findUnique({
+      where: {
+        id: projectId,
+        userId: userId
+      },
+    });
+
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return
+    }
+
+    const s3Key = `${project.s3basePath}${filePath}`;
+
+    console.log(`[GET FILE CONTENT] Reading ${s3Key} from S3`);
+
+    const command = new GetObjectCommand({
+      Bucket: BUCKET_NAME,
+      Key: s3Key,
+    });
+
+    const response = await s3Client.send(command);
+    const stream = response.Body as Readable;
+
+    let content = "";
+    for await (const chunk of stream) {
+      content += chunk.toString();
+    }
+
+    res.status(200).json({
+      content,
+      path: filePath,
+      size: content.length,
+    });
+
+  } catch (error: any) {
+    console.error("[GET FILE CONTENT] Error:", error);
+
+    if (error.name === "NoSuchKey") {
+      res.status(404).json({ error: "File not found" });
+      return
+    }
+
+    res.status(500).json({ error: "Failed to read file" });
+  }
+};
+
+
