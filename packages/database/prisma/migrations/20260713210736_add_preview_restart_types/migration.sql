@@ -1,0 +1,8 @@
+-- AlterEnum
+ALTER TYPE "JobType" ADD VALUE 'PREVIEW_RESTART';
+
+-- AlterEnum
+ALTER TYPE "MessageRole" ADD VALUE 'SYSTEM';
+
+-- AlterEnum
+ALTER TYPE "MessageType" ADD VALUE 'PREVIEW_RESTART';

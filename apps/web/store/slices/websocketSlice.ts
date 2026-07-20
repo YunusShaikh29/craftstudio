@@ -18,6 +18,8 @@ export interface WebSocketState {
   activeTools: ActiveTool[]
   lastEvent: WebSocketEvent | null
   changedFiles: string[]
+  // set when the worker emits PREVIEW_READY; cleared on new job start
+  previewUrl: string | null
   error: string | null
 }
 
@@ -30,6 +32,7 @@ const initialState: WebSocketState = {
   activeTools: [],
   lastEvent: null,
   changedFiles: [],
+  previewUrl: null,
   error: null,
 }
 
@@ -58,6 +61,8 @@ const websocketSlice = createSlice({
           state.jobStatus = "running"
           state.error = null
           state.changedFiles = []
+          // clear stale preview so the iframe shows "loading" while the new job runs
+          state.previewUrl = null
           break
 
         case "SANDBOX_CREATED":
@@ -106,6 +111,11 @@ const websocketSlice = createSlice({
           state.error = event.error
           state.activeTools = []
           break
+
+        case "PREVIEW_READY":
+          // worker emits this when the Vite dev server is up and after every file write
+          state.previewUrl = event.previewUrl
+          break
       }
     },
 
@@ -114,6 +124,7 @@ const websocketSlice = createSlice({
       state.jobStatus = "idle"
       state.activeTools = []
       state.changedFiles = []
+      state.previewUrl = null
       state.error = null
     },
 
@@ -125,6 +136,15 @@ const websocketSlice = createSlice({
     clearSandboxId: (state) => {
       state.activeSandboxId = null
     },
+
+    // Load existing sandbox state from database when project is fetched
+    loadExistingSandbox: (
+      state,
+      action: PayloadAction<{ sandboxId: string | null; previewUrl: string | null }>
+    ) => {
+      state.activeSandboxId = action.payload.sandboxId
+      state.previewUrl = action.payload.previewUrl
+    },
   },
 })
 
@@ -135,6 +155,7 @@ export const {
   resetJobState,
   setJobPending,
   clearSandboxId,
+  loadExistingSandbox,
 } = websocketSlice.actions
 
 export default websocketSlice.reducer

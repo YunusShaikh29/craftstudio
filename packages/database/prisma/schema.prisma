@@ -18,17 +18,20 @@ enum ProjectStatus {
 enum MessageRole {
   USER
   ASSISTANT
+  SYSTEM
 }
 
 enum MessageType {
  CHAT //ask queries without any code change
  EDIT //edit code
+ PREVIEW_RESTART //restart preview without AI
 }
 
 enum JobType {
   PROMPT
   DEPLOY
   BUILD
+  PREVIEW_RESTART
 }
 
 enum JobStatus {

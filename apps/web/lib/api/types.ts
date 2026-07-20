@@ -57,6 +57,7 @@ export interface SandboxSession {
   status: "ACTIVE" | "EXPIRED" | "FAILED" | "COMPLETED"
   startedAt: string
   endedAt: string | null
+  previewUrl: string | null
 }
 
 export interface ChangeSet {
@@ -96,6 +97,7 @@ export type WebSocketEventType =
   | "CHANGESET_CREATED"
   | "JOB_COMPLETED"
   | "JOB_FAILED"
+  | "PREVIEW_READY"
 
 export interface WSJobStarted {
   event: "JOB_STARTED"
@@ -161,6 +163,12 @@ export interface WSJobFailed {
   duration: number
 }
 
+export interface WSPreviewReady {
+  event: "PREVIEW_READY"
+  previewUrl: string
+  jobId: string
+}
+
 export type WebSocketEvent =
   | WSJobStarted
   | WSSandboxCreated
@@ -172,6 +180,7 @@ export type WebSocketEvent =
   | WSChangeSetCreated
   | WSJobCompleted
   | WSJobFailed
+  | WSPreviewReady
 
 // Error response
 export interface ApiError {

@@ -53,8 +53,10 @@ export async function uploadFile(key: string, body: string) {
  * Populate sandbox from R2. Returns number of files populated.
  */
 export async function populateSandbox(sandbox: Sandbox, project: Project): Promise<number> {
-  const r2Keys = await listFiles(project.s3basePath || "");
-  console.log(`Found ${r2Keys.length} files in R2 for population.`);
+  // Ensure trailing slash to avoid matching wrong projects
+  const prefix = project.s3basePath ? project.s3basePath.replace(/\/?$/, "/") : "";
+  const r2Keys = await listFiles(prefix);
+  console.log(`Found ${r2Keys.length} files in R2 for population at prefix: ${prefix}`);
 
   if (r2Keys.length === 0) return 0;
 
@@ -63,8 +65,8 @@ export async function populateSandbox(sandbox: Sandbox, project: Project): Promi
       if (key.includes('.wh.')) return;
 
       try {
-        // derive relative path by removing prefix
-        const rel = key.replace(project.s3basePath, "").replace(/^\//, "");
+        // derive relative path by removing prefix (prefix already has trailing slash)
+        const rel = key.replace(prefix, "");
         const content = await downloadFile(key);
 
         // Write to the correct path in sandbox

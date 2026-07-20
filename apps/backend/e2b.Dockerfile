@@ -11,8 +11,7 @@ RUN npx create-vite@latest tempapp --template react-ts --yes && \
 RUN npm install
 
 # Install Tailwind and related packages
-RUN npm install -D tailwindcss postcss autoprefixer
-
+RUN npm install -D tailwindcss@3 postcss@8 autoprefixer@10
 # Manually create tailwind.config.js
 RUN echo '/** @type {import("tailwindcss").Config} */' > tailwind.config.js && \
     echo 'export default {' >> tailwind.config.js && \

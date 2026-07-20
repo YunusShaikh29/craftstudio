@@ -10,6 +10,12 @@ import type {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api/v0"
 
+export interface FileEntry {
+  path: string
+  size: number
+  lastModified?: string
+}
+
 export interface ProjectState {
   projects: Project[]
   currentProject: ProjectWithDetails | null
@@ -18,6 +24,12 @@ export interface ProjectState {
   isSending: boolean
   error: string | null
   pendingPrompt: string | null
+  // file browser state
+  projectFiles: FileEntry[]
+  selectedFilePath: string | null
+  selectedFileContent: string | null
+  isLoadingFiles: boolean
+  isLoadingFileContent: boolean
 }
 
 const initialState: ProjectState = {
@@ -28,6 +40,11 @@ const initialState: ProjectState = {
   isSending: false,
   error: null,
   pendingPrompt: null,
+  projectFiles: [],
+  selectedFilePath: null,
+  selectedFileContent: null,
+  isLoadingFiles: false,
+  isLoadingFileContent: false,
 }
 
 export const createProjectThunk = createAsyncThunk(
@@ -35,7 +52,7 @@ export const createProjectThunk = createAsyncThunk(
   async ({ prompt, type }: { prompt: string; type: "CHAT" | "EDIT" }, { rejectWithValue }) => {
     try {
       const { data } = await axios.post<CreateProjectResponse>(
-        `${API_URL}/api/v0/projects`,
+        `${API_URL}/projects`,
         { prompt, type },
         { withCredentials: true }
       )
@@ -51,7 +68,7 @@ export const fetchProjectsThunk = createAsyncThunk(
   async (_, { rejectWithValue }) => {
     try {
       const { data } = await axios.get<{ projects: Project[] }>(
-        `${API_URL}/api/v0/projects/getAll`,
+        `${API_URL}/projects/getAll`,
         { withCredentials: true }
       )
       return data.projects
@@ -66,7 +83,7 @@ export const fetchProjectThunk = createAsyncThunk(
   async (projectId: string, { rejectWithValue }) => {
     try {
       const { data } = await axios.get<GetProjectResponse>(
-        `${API_URL}/api/v0/projects/${projectId}`,
+        `${API_URL}/projects/${projectId}`,
         { withCredentials: true }
       )
       return data.project
@@ -95,13 +112,63 @@ export const sendMessageThunk = createAsyncThunk(
   ) => {
     try {
       const { data } = await axios.post<CreateProjectResponse>(
-        `${API_URL}/api/v0/projects`,
+        `${API_URL}/projects`,
         { projectId, prompt, type, sandboxId },
         { withCredentials: true }
       )
       return { ...data, prompt, type }
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.error || "Failed to send message")
+    }
+  }
+)
+
+export const fetchProjectFilesThunk = createAsyncThunk(
+  "project/fetchFiles",
+  async (projectId: string, { rejectWithValue }) => {
+    try {
+      const { data } = await axios.get<{ files: FileEntry[] }>(
+        `${API_URL}/projects/${projectId}/files`,
+        { withCredentials: true }
+      )
+      return data.files
+    } catch (error: any) {
+      return rejectWithValue(error.response?.data?.error || "Failed to fetch files")
+    }
+  }
+)
+
+export const fetchFileContentThunk = createAsyncThunk(
+  "project/fetchFileContent",
+  async (
+    { projectId, filePath }: { projectId: string; filePath: string },
+    { rejectWithValue }
+  ) => {
+    try {
+      const { data } = await axios.get<{ content: string; path: string }>(
+        // filePath already starts without a leading slash from the backend response
+        `${API_URL}/projects/${projectId}/files/${filePath}`,
+        { withCredentials: true }
+      )
+      return data
+    } catch (error: any) {
+      return rejectWithValue(error.response?.data?.error || "Failed to fetch file content")
+    }
+  }
+)
+
+export const restartPreviewThunk = createAsyncThunk(
+  "project/restartPreview",
+  async (projectId: string, { rejectWithValue }) => {
+    try {
+      const { data } = await axios.post<{ message: string; jobId: string }>(
+        `${API_URL}/projects/${projectId}/restart-preview`,
+        {},
+        { withCredentials: true }
+      )
+      return data
+    } catch (error: any) {
+      return rejectWithValue(error.response?.data?.error || "Failed to restart preview")
     }
   }
 )
@@ -124,6 +191,9 @@ const projectSlice = createSlice({
     clearCurrentProject: (state) => {
       state.currentProject = null
       state.messages = []
+      state.projectFiles = []
+      state.selectedFilePath = null
+      state.selectedFileContent = null
     },
     // Add a message to the current conversation (for optimistic UI or WS updates)
     addMessage: (state, action: PayloadAction<Message>) => {
@@ -137,6 +207,12 @@ const projectSlice = createSlice({
       if (state.currentProject) {
         state.currentProject.status = action.payload.status
       }
+    },
+
+    setSelectedFilePath: (state, action: PayloadAction<string | null>) => {
+      state.selectedFilePath = action.payload
+      // clear stale content immediately so the editor doesn't flash old code
+      state.selectedFileContent = null
     },
   },
 
@@ -217,6 +293,45 @@ const projectSlice = createSlice({
           (msg) => !msg.id.startsWith("temp-")
         )
       })
+
+    builder
+      .addCase(fetchProjectFilesThunk.pending, (state) => {
+        state.isLoadingFiles = true
+      })
+      .addCase(fetchProjectFilesThunk.fulfilled, (state, action) => {
+        state.isLoadingFiles = false
+        state.projectFiles = action.payload
+      })
+      .addCase(fetchProjectFilesThunk.rejected, (state) => {
+        state.isLoadingFiles = false
+      })
+
+    builder
+      .addCase(fetchFileContentThunk.pending, (state) => {
+        state.isLoadingFileContent = true
+      })
+      .addCase(fetchFileContentThunk.fulfilled, (state, action) => {
+        state.isLoadingFileContent = false
+        state.selectedFileContent = action.payload.content
+        state.selectedFilePath = action.payload.path
+      })
+      .addCase(fetchFileContentThunk.rejected, (state) => {
+        state.isLoadingFileContent = false
+        state.selectedFileContent = null
+      })
+
+    builder
+      .addCase(restartPreviewThunk.pending, (state) => {
+        state.isLoading = true
+      })
+      .addCase(restartPreviewThunk.fulfilled, (state) => {
+        state.isLoading = false
+        // Preview URL will be updated via WebSocket JOB_COMPLETED event
+      })
+      .addCase(restartPreviewThunk.rejected, (state, action) => {
+        state.isLoading = false
+        state.error = action.payload as string
+      })
   },
 })
 
@@ -227,6 +342,7 @@ export const {
   clearCurrentProject,
   addMessage,
   updateProjectStatus,
+  setSelectedFilePath,
 } = projectSlice.actions
 export default projectSlice.reducer
 

@@ -32,10 +32,8 @@ async function publishFileUpdated(path: string, isNew: boolean) {
  * Converts relative paths to absolute sandbox paths
  */
 function normalizePath(path: string): string {
-  // Remove leading ./ or /
-  let cleanPath = path.replace(/^\.\//, "").replace(/^\//, "");
+  let cleanPath = path.replace(/^\.\//,  "").replace(/^\//,  "");
   
-  // If path doesn't start with /home/user, add it
   if (!cleanPath.startsWith(SANDBOX_BASE_PATH)) {
     return `${SANDBOX_BASE_PATH}/${cleanPath}`;
   }
@@ -46,6 +44,91 @@ function normalizePath(path: string): string {
 
 function getRelativePath(fullPath: string): string {
   return fullPath.replace(SANDBOX_BASE_PATH + '/', '').replace(/^\//, '');
+}
+
+/**
+ * Basic JSX/TSX syntax validation to catch common errors before writing files
+ * Returns null if valid, error message if invalid
+ */
+function validateJSXSyntax(path: string, content: string): string | null {
+  const isTsxFile = path.endsWith('.tsx') || path.endsWith('.jsx');
+  const hasJSX = content.includes('<') && content.includes('>');
+  
+  if (!isTsxFile && !hasJSX) return null;
+  
+  const openTags = (content.match(/<[a-zA-Z][a-zA-Z0-9]*[^>]*>/g) || []).length;
+  const closeTags = (content.match(/<\/[a-zA-Z][a-zA-Z0-9]*>/g) || []).length;
+  const selfClosingTags = (content.match(/<[a-zA-Z][a-zA-Z0-9]*[^>]*\/>/g) || []).length;
+  
+  if (openTags - selfClosingTags !== closeTags) {
+    return `JSX tag mismatch: ${openTags - selfClosingTags} opening tags but ${closeTags} closing tags. Ensure all tags are properly closed.`;
+  }
+  
+  const cleanContent = content
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*/g, '')
+    .replace(/'[^']*'/g, '')
+    .replace(/"[^"]*"/g, '')
+    .replace(/`[^`]*`/g, '');
+  
+  const openBraces = (cleanContent.match(/\{/g) || []).length;
+  const closeBraces = (cleanContent.match(/\}/g) || []).length;
+  
+  if (openBraces !== closeBraces) {
+    return `Unbalanced braces: ${openBraces} opening '{' but ${closeBraces} closing '}'. Check JSX expressions and ensure all braces are matched.`;
+  }
+  
+  if (content.includes('className={') && !content.includes('className={"') && !content.includes("className={'")) {
+    const incompleteClassName = content.match(/className=\{[^}]*$/m);
+    if (incompleteClassName) {
+      return `Incomplete className expression detected. Ensure all className attributes are properly closed with '}'.`;
+    }
+  }
+  
+  const openParens = (cleanContent.match(/\(/g) || []).length;
+  const closeParens = (cleanContent.match(/\)/g) || []).length;
+  
+  if (openParens !== closeParens) {
+    return `Unbalanced parentheses: ${openParens} opening '(' but ${closeParens} closing ')'. Check .map() calls and function calls in JSX.`;
+  }
+  
+  return null;
+}
+
+/**
+ * Basic CSS syntax validation to catch common errors before writing files
+ * Returns null if valid, error message if invalid
+ */
+function validateCSSSyntax(path: string, content: string): string | null {
+  if (!path.endsWith('.css')) return null;
+  
+  const cleanContent = content
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/'[^']*'/g, '')
+    .replace(/"[^"]*"/g, '');
+  
+  const openBraces = (cleanContent.match(/\{/g) || []).length;
+  const closeBraces = (cleanContent.match(/\}/g) || []).length;
+  
+  if (openBraces !== closeBraces) {
+    return `CSS syntax error: ${openBraces} opening '{' but ${closeBraces} closing '}'. Ensure all CSS blocks are properly closed.`;
+  }
+  
+  const openParens = (cleanContent.match(/\(/g) || []).length;
+  const closeParens = (cleanContent.match(/\)/g) || []).length;
+  
+  if (openParens !== closeParens) {
+    return `CSS syntax error: ${openParens} opening '(' but ${closeParens} closing ')'. Check CSS functions like calc(), rgba(), etc.`;
+  }
+  
+  const openBrackets = (cleanContent.match(/\[/g) || []).length;
+  const closeBrackets = (cleanContent.match(/\]/g) || []).length;
+  
+  if (openBrackets !== closeBrackets) {
+    return `CSS syntax error: ${openBrackets} opening '[' but ${closeBrackets} closing ']'. Check attribute selectors.`;
+  }
+  
+  return null;
 }
 
 export const TOOLS = {
@@ -61,7 +144,6 @@ export const TOOLS = {
         throw new Error("Sandbox not found");
       }
       try {
-        // Normalize the directory path
         const fullPath = directory === '.' || directory === './' 
           ? SANDBOX_BASE_PATH 
           : normalizePath(directory);
@@ -92,7 +174,6 @@ export const TOOLS = {
           );
         });
         
-        // Convert to relative paths for cleaner output
         const formattedFiles = relevantItems.map(f => ({
           path: getRelativePath(f.path),
           type: f.type,
@@ -259,6 +340,26 @@ export const TOOLS = {
         const fullPath = normalizePath(path);
         const relativePath = getRelativePath(fullPath);
         
+        const jsxValidationError = validateJSXSyntax(relativePath, content);
+        if (jsxValidationError) {
+          console.error(`[WRITE FILE] JSX validation failed for ${relativePath}: ${jsxValidationError}`);
+          return { 
+            success: false, 
+            error: `JSX validation failed: ${jsxValidationError}. Please fix the code before writing.`,
+            path: relativePath 
+          };
+        }
+        
+        const cssValidationError = validateCSSSyntax(relativePath, content);
+        if (cssValidationError) {
+          console.error(`[WRITE FILE] CSS validation failed for ${relativePath}: ${cssValidationError}`);
+          return { 
+            success: false, 
+            error: `CSS validation failed: ${cssValidationError}. Please fix the CSS before writing.`,
+            path: relativePath 
+          };
+        }
+        
         let oldContent = "";
         let isNew = true;
 
@@ -347,6 +448,26 @@ export const TOOLS = {
         ];
   
         const updatedContent = updatedLines.join("\n");
+        
+        const jsxValidationError = validateJSXSyntax(relativePath, updatedContent);
+        if (jsxValidationError) {
+          console.error(`[REPLACE LINES] JSX validation failed for ${relativePath}: ${jsxValidationError}`);
+          return { 
+            success: false, 
+            error: `JSX validation failed after replacement: ${jsxValidationError}. The changes would break the file.`,
+            path: relativePath 
+          };
+        }
+        
+        const cssValidationError = validateCSSSyntax(relativePath, updatedContent);
+        if (cssValidationError) {
+          console.error(`[REPLACE LINES] CSS validation failed for ${relativePath}: ${cssValidationError}`);
+          return { 
+            success: false, 
+            error: `CSS validation failed after replacement: ${cssValidationError}. The changes would break the file.`,
+            path: relativePath 
+          };
+        }
   
         fileChangesMap.set(fullPath, {
           oldContent,

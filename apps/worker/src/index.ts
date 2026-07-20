@@ -174,18 +174,26 @@ async function main() {
           try {
             sandbox = await Sandbox.connect(activeSession.id);
             const reconnectDuration = Date.now() - reconnectStartTime;
-            console.log(`[JOB ${jobId}] Reconnected to sandbox ${activeSession.id} in ${reconnectDuration}ms`);
+            console.log(`[JOB ${jobId}] Successfully reconnected to sandbox ${activeSession.id} in ${reconnectDuration}ms`);
             needsNewSandbox = false;
 
-            // Re-use the stored preview URL if vite is already running,
-            // otherwise spin it up again and update the DB.
-            const logCheck = await sandbox.runCode("cat /tmp/vite.log 2>/dev/null | tail -5", { language: "bash" });
-            const viteRunning = logCheck.logs?.stdout?.includes("Local:") || logCheck.logs?.stdout?.includes("ready in");
+            try {
+              const logCheck = await sandbox.runCode("cat /tmp/vite.log 2>/dev/null | tail -5", { language: "bash" });
+              const viteRunning = logCheck.logs?.stdout?.includes("Local:") || logCheck.logs?.stdout?.includes("ready in");
 
-            if (viteRunning && activeSession.previewUrl) {
-              previewUrl = activeSession.previewUrl;
-              console.log(`[JOB ${jobId}] Vite already running, reusing URL: ${previewUrl}`);
-            } else {
+              if (viteRunning && activeSession.previewUrl) {
+                previewUrl = activeSession.previewUrl;
+                console.log(`[JOB ${jobId}] Vite already running, reusing URL: ${previewUrl}`);
+              } else {
+                console.log(`[JOB ${jobId}] Vite not running, starting dev server...`);
+                previewUrl = await startDevServer(sandbox, projectId!, jobId!);
+                await prisma.sandboxSession.update({
+                  where: { id: activeSession.id },
+                  data: { previewUrl },
+                });
+              }
+            } catch (viteError) {
+              console.warn(`[JOB ${jobId}] Vite check failed, starting dev server anyway:`, (viteError as any)?.message);
               previewUrl = await startDevServer(sandbox, projectId!, jobId!);
               await prisma.sandboxSession.update({
                 where: { id: activeSession.id },
@@ -204,7 +212,6 @@ async function main() {
               })
             );
 
-            // Always emit PREVIEW_READY so the frontend iframe refreshes
             await redis.publish(
               `project:${projectId}`,
               JSON.stringify({ event: "PREVIEW_READY", previewUrl, jobId })
@@ -213,8 +220,9 @@ async function main() {
           } catch (error) {
             const reconnectDuration = Date.now() - reconnectStartTime;
             console.log(
-              `[JOB ${jobId}] Failed to reconnect to sandbox ${activeSession.id} after ${reconnectDuration}ms, creating a new one.`
+              `[JOB ${jobId}] Sandbox reconnection actually failed after ${reconnectDuration}ms:`, (error as any)?.message
             );
+            console.log(`[JOB ${jobId}] Will create a new sandbox`);
             await prisma.sandboxSession.update({
               where: { id: activeSession.id },
               data: { status: "EXPIRED" },
@@ -256,11 +264,29 @@ async function main() {
               console.log(`[JOB ${jobId}] Populated sandbox in ${populateDuration}ms (filesFound=${populatedCount})`);
         
               if (populatedCount === 0) {
+                console.log(`[JOB ${jobId}] No files in R2, initializing with base template...`);
                 try {
-                  const uploaded = await s3.syncSandboxToS3(sandbox, project.s3basePath);
-                  console.log(`[JOB ${jobId}] Initial template uploaded ${uploaded.length} files`);
+                  // Initialize base template files
+                  const { BASE_TEMPLATE_FILES, getTemplatePath } = await import("./template.js");
+                  const templateFiles = Object.entries(BASE_TEMPLATE_FILES);
+                  
+                  if (sandbox) {
+                    await Promise.all(
+                      templateFiles.map(async ([relativePath, content]) => {
+                        const fullPath = getTemplatePath(relativePath);
+                        await sandbox!.files.write(fullPath, content);
+                        console.log(`[JOB ${jobId}] Created template file: ${relativePath}`);
+                      })
+                    );
+                    
+                    console.log(`[JOB ${jobId}] Initialized ${templateFiles.length} base template files`);
+                    
+                    // Sync template to R2 for future use
+                    const uploaded = await s3.syncSandboxToS3(sandbox, project.s3basePath);
+                    console.log(`[JOB ${jobId}] Initial template uploaded ${uploaded.length} files to R2`);
+                  }
                 } catch (err) {
-                  console.error(`[JOB ${jobId}] Failed initial template upload:`, err);
+                  console.error(`[JOB ${jobId}] Failed initial template setup:`, err);
                 }
               }
         
@@ -359,6 +385,32 @@ async function main() {
 
         setSandbox(sandbox);
         setProjectId(projectId!);
+
+        // ── For PREVIEW_RESTART jobs, skip LLM and just complete ──────────────
+        if (prompt?.type === "PREVIEW_RESTART") {
+          console.log(`[JOB ${jobId}] PREVIEW_RESTART job - skipping LLM execution`);
+          
+          await prisma.job.update({
+            where: { id: jobId },
+            data: { status: "COMPLETED", completedAt: new Date() },
+          });
+
+          const totalJobDuration = Date.now() - jobStartTime;
+          console.log(`[JOB ${jobId}] Preview restart completed successfully in ${totalJobDuration}ms`);
+
+          await redis.publish(
+            `project:${projectId}`,
+            JSON.stringify({ 
+              event: "JOB_COMPLETED", 
+              jobId, 
+              duration: totalJobDuration, 
+              previewUrl,
+              type: "PREVIEW_RESTART"
+            })
+          );
+          
+          continue; // Skip to next job
+        }
 
         const llmStartTime = Date.now();
         console.log(`[JOB ${jobId}] Starting LLM execution`);

@@ -3,13 +3,13 @@
 import { useEffect } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
-import { fetchProjectThunk, clearCurrentProject, addMessage } from "@/store/slices/projectSlice"
-import { resetJobState } from "@/store/slices/websocketSlice"
+import { fetchProjectThunk, clearCurrentProject } from "@/store/slices/projectSlice"
+import { resetJobState, loadExistingSandbox } from "@/store/slices/websocketSlice"
 import { useProjectWebSocket } from "@/hooks/useProjectWebSocket"
 import { ChatInterface } from "@/components/chat/ChatInterface"
-import { Loader2, ArrowLeft, Code, Eye } from "lucide-react"
+import { WorkspacePanel } from "@/components/workspace/WorkspacePanel"
+import { Loader2, ArrowLeft } from "lucide-react"
 import Link from "next/link"
-import type { Message } from "@/lib/api/types"
 
 export default function ProjectPage() {
   const params = useParams()
@@ -23,7 +23,7 @@ export default function ProjectPage() {
   const { currentProject, isLoading, error } = useAppSelector(
     (state) => state.project
   )
-  const { lastEvent, jobStatus, activeSandboxId } = useAppSelector(
+  const { lastEvent } = useAppSelector(
     (state) => state.websocket
   )
 
@@ -52,6 +52,46 @@ export default function ProjectPage() {
       dispatch(fetchProjectThunk(projectId))
     }
   }, [lastEvent, projectId, dispatch])
+
+  // Load existing sandbox session from database when project is fetched
+  useEffect(() => {
+    console.log("[PROJECT PAGE] Current project:", currentProject)
+    console.log("[PROJECT PAGE] Sandbox sessions:", currentProject?.sandboxSession)
+    
+    if (currentProject && currentProject.sandboxSession && currentProject.sandboxSession.length > 0) {
+      // Find the most recent sandbox session (sort by startedAt descending)
+      // Don't filter by status - we want to show restart button for expired sandboxes
+      const sortedSessions = [...currentProject.sandboxSession].sort((a, b) => 
+        new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime()
+      )
+      
+      const mostRecentSession = sortedSessions[0]
+      
+      console.log("[PROJECT PAGE] Most recent session:", mostRecentSession)
+      
+      if (mostRecentSession) {
+        // Load sandbox data into Redux regardless of status
+        // PreviewPanel will detect if expired and show restart button
+        console.log("[PROJECT PAGE] Loading sandbox session:", {
+          sandboxId: mostRecentSession.id,
+          previewUrl: mostRecentSession.previewUrl,
+          status: mostRecentSession.status,
+          startedAt: mostRecentSession.startedAt,
+        })
+        
+        dispatch(
+          loadExistingSandbox({
+            sandboxId: mostRecentSession.id,
+            previewUrl: mostRecentSession.previewUrl,
+          })
+        )
+      } else {
+        console.log("[PROJECT PAGE] No sandbox sessions at all")
+      }
+    } else {
+      console.log("[PROJECT PAGE] No project or no sandbox sessions")
+    }
+  }, [currentProject, dispatch])
 
   // Redirect to login if not authenticated
   useEffect(() => {
@@ -115,37 +155,7 @@ export default function ProjectPage() {
         </div>
 
         <div className="flex-1 flex flex-col bg-[var(--color-charcoal)] min-h-0">
-          <div className="h-10 border-b border-[var(--color-deep-plum)]/30 flex items-center px-2 gap-1">
-            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm bg-[var(--color-deep-plum)]/30 text-[var(--color-soft-white)]">
-              <Code className="w-3.5 h-3.5" />
-              Code
-            </button>
-            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm text-[var(--color-muted)] hover:text-[var(--color-soft-white)] hover:bg-[var(--color-charcoal)]">
-              <Eye className="w-3.5 h-3.5" />
-              Preview
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-y-auto min-h-0">
-
-            <div className="min-h-full flex items-center justify-center">
-              <div className="text-center p-8">
-                <Code className="w-12 h-12 mx-auto mb-4 text-[var(--color-muted)]" />
-                <h2 className="text-lg font-medium text-[var(--color-soft-white)] mb-2">
-                  Code Editor Coming Soon
-                </h2>
-                <p className="text-sm text-[var(--color-muted)] max-w-md">
-                  The code editor and preview will be available here. For now,
-                  use the chat to interact with your project.
-                </p>
-                {activeSandboxId && (
-                  <p className="text-xs text-[var(--color-muted)] mt-4">
-                    Active Sandbox: {activeSandboxId}
-                  </p>
-                )}
-              </div>
-            </div>
-          </div>
+          <WorkspacePanel projectId={projectId} />
         </div>
       </main>
     </div>

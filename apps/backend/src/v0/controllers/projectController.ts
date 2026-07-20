@@ -9,16 +9,27 @@ import { GetObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/clien
 import { Readable } from "stream";
 dotenv.config();
 
+// Configure S3 client for Cloudflare R2 or fallback to AWS S3
+const s3Client = new S3Client(
+  process.env.R2_ACCOUNT_ID
+    ? {
+        region: "auto", // R2 uses "auto" instead of AWS regions
+        endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+        credentials: {
+          accessKeyId: process.env.R2_ACCESS_KEY!,
+          secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+        },
+      }
+    : {
+        region: process.env.AWS_REGION!,
+        credentials: {
+          accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+        },
+      }
+);
 
-const s3Client = new S3Client({
-  region: process.env.AWS_REGION!,
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
-  },
-});
-
-const BUCKET_NAME = process.env.BUCKET_NAME || "craftstudio"
+const BUCKET_NAME = process.env.R2_BUCKET_NAME || process.env.S3_BUCKET_NAME || process.env.BUCKET_NAME || "craftstudio-projects"
 
 export const createOrEditProject = async (
   req: AuthRequest,
@@ -246,18 +257,24 @@ export const getFiles = async (req: AuthRequest, res: Response) => {
     return
   }
 
+  // Ensure trailing slash to avoid matching wrong projects (e.g., "project123" matching "project1234")
+  const prefix = project.s3basePath ? project.s3basePath.replace(/\/?$/, "/") : ""
+
   //listing all the files
   const command = new ListObjectsV2Command({
     Bucket: BUCKET_NAME,
-    Prefix: project.s3basePath
+    Prefix: prefix
   })
+
+  // console.log(`[GET FILES] Listing files for project ${project.id} at R2 path ${prefix}`)
+
 
   try {
 
     const response = await s3Client.send(command)
     const files = (response.Contents || []).map((obj) => (
       {
-        path: obj.Key!.replace(project.s3basePath, "").replace(/^\//, ""),
+        path: obj.Key!.replace(prefix, ""),
         size: obj.Size || 0,
         lastModified: obj.LastModified
       }
@@ -306,9 +323,11 @@ export const getFileContent = async (req: AuthRequest, res: Response) => {
       return
     }
 
-    const s3Key = `${project.s3basePath}${filePath}`;
+    // Ensure proper path concatenation with slash
+    const base = project.s3basePath ? project.s3basePath.replace(/\/?$/, "/") : "";
+    const s3Key = `${base}${filePath}`;
 
-    console.log(`[GET FILE CONTENT] Reading ${s3Key} from S3`);
+    console.log(`[GET FILE CONTENT] Reading ${s3Key} from R2/S3`);
 
     const command = new GetObjectCommand({
       Bucket: BUCKET_NAME,
@@ -341,4 +360,77 @@ export const getFileContent = async (req: AuthRequest, res: Response) => {
   }
 };
 
+/**
+ * Restart preview for an existing project without AI interaction
+ * Creates a new sandbox, populates from R2, starts Vite, returns preview URL
+ * Much cheaper than sending a message through the AI
+ */
+export const restartPreview = async (req: AuthRequest, res: Response) => {
+  try {
+    const { id: projectId } = req.params;
+    const userId = req.user?.id;
+
+    if (!userId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const project = await prisma.project.findUnique({
+      where: {
+        id: projectId,
+        userId: userId,
+      },
+    });
+
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+
+    // Mark any existing active sandboxes as expired
+    await prisma.sandboxSession.updateMany({
+      where: {
+        projectId: projectId,
+        status: "ACTIVE",
+      },
+      data: {
+        status: "EXPIRED",
+      },
+    });
+
+    // Create a system message for this preview restart
+    const message = await prisma.message.create({
+      data: {
+        projectId: projectId,
+        role: "SYSTEM",
+        type: "PREVIEW_RESTART",
+        content: "Restarting preview environment...",
+      },
+    });
+
+    // Create a job for preview restart
+    const job = await prisma.job.create({
+      data: {
+        projectId: projectId,
+        type: "PREVIEW_RESTART",
+        status: "PENDING",
+      },
+    });
+
+    await addJobToQueue({
+      jobId: job.id,
+      projectId: projectId,
+      messageId: message.id,
+      activeSessionId: "",
+    });
+
+    res.status(200).json({
+      message: "Preview restart initiated",
+      jobId: job.id,
+    });
+  } catch (error: any) {
+    console.error("[RESTART PREVIEW] Error:", error);
+    res.status(500).json({ error: "Failed to restart preview" });
+  }
+};
 

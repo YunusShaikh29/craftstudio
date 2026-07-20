@@ -2,7 +2,7 @@ import { createSlice, createAsyncThunk, PayloadAction } from "@reduxjs/toolkit"
 import axios from "axios"
 import type { User } from "@/lib/api/types"
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api/v0"
 
 export interface AuthState {
   user: User | null
@@ -23,7 +23,7 @@ export const loginThunk = createAsyncThunk(
   "auth/login",
   async (email: string, { rejectWithValue }) => {
     try {
-      const { data } = await axios.post(`${API_URL}/api/v0/auth/signin`, { email }, { withCredentials: true })
+      const { data } = await axios.post(`${API_URL}/auth/signin`, { email }, { withCredentials: true })
       return data
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.error || "Failed to send magic link")
@@ -35,7 +35,7 @@ export const getMeThunk = createAsyncThunk(
   "auth/getMe",
   async (_, { rejectWithValue }) => {
     try {
-      const { data } = await axios.get(`${API_URL}/api/v0/auth/me`, { withCredentials: true })
+      const { data } = await axios.get(`${API_URL}/auth/me`, { withCredentials: true })
       return data
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.error || "Not authenticated")
@@ -47,7 +47,7 @@ export const logoutThunk = createAsyncThunk(
   "auth/logout",
   async (_, { rejectWithValue }) => {
     try {
-      const { data } = await axios.post(`${API_URL}/api/v0/auth/logout`, {}, { withCredentials: true })
+      const { data } = await axios.post(`${API_URL}/auth/logout`, {}, { withCredentials: true })
       return data
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.error || "Failed to logout")
